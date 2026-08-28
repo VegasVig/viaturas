@@ -1274,8 +1274,24 @@ function wzNav(back=true,nextLbl="Continuar",nextFn="wzNext()"){
     ${back?`<button class="btn sec" onclick="wzBack()">‹ Voltar</button>`:`<button class="btn sec" onclick="cancelWizard()">Cancelar</button>`}
     <button class="btn" onclick="${nextFn}">${nextLbl}</button></div>`;
 }
-function wzBack(){ if(WZ.step>0){WZ.step--;wzSave();renderWizard();} else cancelWizard(); }
-function wzNext(){ WZ.step++;wzSave();renderWizard(); }
+function wzBack(){ wzCaptureStep(); if(WZ.step>0){WZ.step--;wzSave();renderWizard();} else cancelWizard(); }
+function wzNext(){ wzCaptureStep(); WZ.step++;wzSave();renderWizard(); }
+/* Lê os campos de texto/número da etapa atual e grava no WZ.
+   (os campos de seleção/foto já gravam sozinhos ao serem tocados) */
+function wzCaptureStep(){
+  const km=$("#wz-km"); if(km) WZ.kmInicial=km.value.trim();
+  const fin=$("#wz-finalidade"); if(fin) WZ.finalidade=fin.value.trim();
+  const dest=$("#wz-destoutro");
+  if(dest && WZ.destinoId==="_outro") WZ.destinoNome=dest.value.trim();
+  // descrições de checklist com problema
+  CHECKLIST_ITENS && CHECKLIST_ITENS.forEach((it,i)=>{
+    const dsc=$("#chk-desc-"+i);
+    if(dsc){ WZ.checklist[i]=WZ.checklist[i]||{}; WZ.checklist[i].desc=dsc.value; }
+  });
+  // avaria (descrição)
+  const av=$("#wz-avaria-desc"); if(av){ WZ.avaria=WZ.avaria||{}; WZ.avaria.desc=av.value.trim(); }
+  wzSave();
+}
 function cancelWizard(){ if(confirm("Cancelar retirada? O progresso será perdido.")){wzClear();go("mot-home");} }
 
 /* etapa 1 - motorista */
@@ -1300,24 +1316,23 @@ function stVeiculo(b){
 }
 function pickVeic(id){ WZ.veiculoId=id; const v=veiculo(id); if(!WZ.kmInicial)WZ.kmInicial=v.km||""; wzSave();stVeiculo($("#wz-body")); }
 
-/* etapa 3 - destino */
+/* etapa 3 - destino (entrada manual) */
 function stDestino(b){
-  b.innerHTML=`<h3>Para onde?</h3><p class="desc">Selecione um destino ou informe outro.</p>
-    <div class="pick">${DB.destinos.map(d=>`<div class="opt ${WZ.destinoId===d.id?"sel":""}" onclick="pickDest('${d.id}','${esc(d.nome)}')">
-      <div class="av">📍</div><div class="info"><div class="t">${esc(d.nome)}</div><div class="s">${esc(d.tipo)}${d.cidade?" · "+esc(d.cidade):""}</div></div><div class="chk"></div></div>`).join("")}
-      <div class="opt ${WZ.destinoId==="_outro"?"sel":""}" onclick="pickDest('_outro','')"><div class="av">✏️</div><div class="info"><div class="t">Outro destino</div><div class="s">Informar manualmente</div></div><div class="chk"></div></div>
-    </div>
-    <div id="outro-box" style="${WZ.destinoId==="_outro"?"":"display:none"}">
-      <label>Descreva o destino</label><input id="wz-destoutro" value="${esc(WZ.destinoId==="_outro"?WZ.destinoNome:"")}" placeholder="Ex.: Cliente XYZ, Rua...">
-    </div>
+  if(WZ.destinoId!=="_outro"){ WZ.destinoId="_outro"; }
+  b.innerHTML=`<h3>Para onde?</h3><p class="desc">Informe o destino da saída.</p>
+    <label>Destino</label>
+    <input id="wz-destoutro" value="${esc(WZ.destinoNome||"")}" placeholder="Ex.: Ronda Centro, Cliente XYZ, Rua...">
     <label style="margin-top:14px">Finalidade da saída</label>
     <input id="wz-finalidade" value="${esc(WZ.finalidade)}" placeholder="Ex.: Ronda, entrega, supervisão...">
     <button class="btn sec sm" style="width:auto;margin-top:12px" onclick="captureGeo()">📍 Registrar minha localização atual</button>
     <div class="hint" id="geo-hint">${WZ.lat?"✓ Localização registrada":"Opcional — usa a localização no momento da saída, se você autorizar."}</div>
     ${wzNav()}`;
 }
-function pickDest(id,nome){ WZ.destinoId=id; WZ.destinoNome=nome; wzSave(); stDestino($("#wz-body")); }
 function captureGeo(){
+  // preserva o que já foi digitado nesta etapa
+  const dest=$("#wz-destoutro"); if(dest)WZ.destinoNome=dest.value.trim();
+  const fin=$("#wz-finalidade"); if(fin)WZ.finalidade=fin.value.trim();
+  wzSave();
   if(!navigator.geolocation){toast("Geolocalização indisponível");return;}
   navigator.geolocation.getCurrentPosition(p=>{
     WZ.lat=p.coords.latitude;WZ.lng=p.coords.longitude;wzSave();
@@ -1336,7 +1351,7 @@ function stKm(b){
     ${wzNav()}`;
   bindPhoto("painel");
 }
-function setComb(n){WZ.nivelComb=n;wzSave();stKm($("#wz-body"));}
+function setComb(n){ const km=$("#wz-km"); if(km)WZ.kmInicial=km.value.trim(); WZ.nivelComb=n;wzSave();stKm($("#wz-body"));}
 
 /* etapa 5 - checklist */
 function stChecklist(b){
