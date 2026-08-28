@@ -354,7 +354,7 @@ const SEED_USUARIOS = [
 /* URL do App da Web publicado no Apps Script (termina em /exec).
    Fica salva no localStorage para você configurar 1x pela tela de ajustes. */
 const API_KEY_STORE = "vegasfrota_api_url";
-let API_URL = localStorage.getItem(API_KEY_STORE) || "";
+let API_URL = localStorage.getItem(API_KEY_STORE) || "https://script.google.com/macros/s/AKfycbw7Fven1E1nYcX1fdbxytGl8JAhAlQbueFzEPBvCRaLcXhUz45CmKsSSYHyUSLuYuCw/exec";
 
 function apiConfigurada(){ return !!API_URL; }
 function setApiUrl(u){
