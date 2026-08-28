@@ -354,7 +354,7 @@ const SEED_USUARIOS = [
 /* URL do App da Web publicado no Apps Script (termina em /exec).
    Fica salva no localStorage para você configurar 1x pela tela de ajustes. */
 const API_KEY_STORE = "vegasfrota_api_url";
-let API_URL = localStorage.getItem(API_KEY_STORE) || "https://script.google.com/macros/s/AKfycbw7Fven1E1nYcX1fdbxytGl8JAhAlQbueFzEPBvCRaLcXhUz45CmKsSSYHyUSLuYuCw/exec";
+let API_URL = localStorage.getItem(API_KEY_STORE) || "";
 
 function apiConfigurada(){ return !!API_URL; }
 function setApiUrl(u){
@@ -580,6 +580,29 @@ function compressImage(file,maxW=1280,quality=.72){
     };
     rd.readAsDataURL(file);
   });
+}
+
+/* Processa um anexo: se for imagem, comprime; se for PDF, lê inteiro.
+   Retorna {dataUrl, tipo:"img"|"pdf", nomeArq}. */
+function fileToDataURL(file){
+  return new Promise((res,rej)=>{
+    const rd=new FileReader();
+    rd.onload=()=>res(rd.result);
+    rd.onerror=rej;
+    rd.readAsDataURL(file);
+  });
+}
+async function processarAnexo(file){
+  if(!file) return null;
+  const ehPdf = file.type==="application/pdf" || /\.pdf$/i.test(file.name||"");
+  if(ehPdf){
+    // limite de segurança ~8MB para não estourar armazenamento
+    if(file.size>8*1024*1024){ toast("PDF muito grande (máx. 8MB)"); return null; }
+    const dataUrl=await fileToDataURL(file);
+    return {dataUrl, tipo:"pdf", nomeArq:file.name||"documento.pdf"};
+  }
+  const dataUrl=await compressImage(file);
+  return {dataUrl, tipo:"img", nomeArq:file.name||"foto.jpg"};
 }
 
 /* ---------- SESSÃO / LOGIN ---------- */
@@ -1494,9 +1517,9 @@ function showComprovanteRet(reg){
 function photoSlotHTML(key,label,em,val){
   const has=!!val;
   return `<div class="photo-slot ${has?"done":""}" id="slot-${key}" onclick="triggerPhoto('${key}')">
-    <input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none">
+    <input type="file" accept="image/*" id="file-${key}" style="display:none">
     ${has?`<img src="${val}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ ${esc(label)}</span>`
-      :`<span class="em">${em}</span><span>${esc(label)}</span><span style="font-size:11px;color:var(--muted2)">Toque para tirar foto</span>`}
+      :`<span class="em">${em}</span><span>${esc(label)}</span><span style="font-size:11px;color:var(--muted2)">Toque: câmera ou galeria</span>`}
   </div>`;
 }
 function triggerPhoto(key){ $("#file-"+key)?.click(); }
@@ -1510,7 +1533,7 @@ function bindPhotoKey(key,cb){
     cb(url);
     const slot=$("#slot-"+key);
     if(slot){slot.classList.add("done");
-      slot.innerHTML=`<input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none"><img src="${url}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ Foto</span>`;
+      slot.innerHTML=`<input type="file" accept="image/*" id="file-${key}" style="display:none"><img src="${url}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ Foto</span>`;
       bindPhotoKey(key,cb);
     }
   };
