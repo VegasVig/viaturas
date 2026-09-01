@@ -358,7 +358,7 @@ let API_URL = localStorage.getItem(API_KEY_STORE) || "";
 
 function apiConfigurada(){ return !!API_URL; }
 function setApiUrl(u){
-  API_URL=(u||"").trim();
+  API_URL=(u||"https://script.google.com/macros/s/AKfycbw7Fven1E1nYcX1fdbxytGl8JAhAlQbueFzEPBvCRaLcXhUz45CmKsSSYHyUSLuYuCw/exec").trim();
   localStorage.setItem(API_KEY_STORE, API_URL);
 }
 
