@@ -1555,41 +1555,37 @@ function showComprovanteRet(reg){
 /* ============ helpers de foto no wizard ============ */
 /* As fotos ficam em WZFOTOS (memória), lidas por chave. photoSlotHTML recebe
    a própria chave e mostra a foto que estiver na memória. */
-function photoSlotHTML(key,label,em,val){
-  const url = WZFOTOS[key] || "";
-  const has = !!url;
-  return `<div class="photo-slot ${has?"done":""}" id="slot-${key}" onclick="triggerPhoto('${key}')">
-    <input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none">
-    ${has?`<img src="${url}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ ${esc(label)}</span>`
-      :`<span class="em">${em}</span><span>${esc(label)}</span><span style="font-size:11px;color:var(--muted2)">Toque para tirar a foto agora</span>`}
-  </div>`;
-}
-function triggerPhoto(key){ $("#file-"+key)?.click(); }
-/* Igual ao cupom: guarda a foto na memória (WZFOTOS) e NÃO chama wzSave. */
-function bindPhoto(key){ bindPhotoKey(key,(url)=>{ WZFOTOS[key]=url; }); }
-function bindPhotoKey(key,cb){
-  const inp=$("#file-"+key); if(!inp)return;
-  inp.onchange=async e=>{
-    try{
-      const f=e.target.files[0]; if(!f)return;
-      toast("Processando foto...");
-      const url=await compressImage(f);
-      cb(url);
-      const slot=$("#slot-"+key);
-      if(slot){slot.classList.add("done");
-        slot.innerHTML=`<input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none"><img src="${url}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ Foto</span>`;
-        bindPhotoKey(key,cb);
+function salvarFoto() {
+  const inputCamer = document.getElementById('camera-input');
+  const file = inputCamer ? inputCamer.files[0] : null;
+
+  if (!file) {
+    alert("Nenhuma foto foi capturada.");
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const base64Image = e.target.result;
+
+    // 1. Armazena a foto na estrutura do seu app/checklist ativo
+    if (typeof fotoTipoAtual !== 'undefined' && fotoTipoAtual) {
+      fotosCapturadas[fotoTipoAtual] = base64Image;
+      
+      // Atualiza o visual do slot da foto para mostrar que foi concluído
+      const slot = document.querySelector(`.photo-slot[data-tipo="${fotoTipoAtual}"]`);
+      if (slot) {
+        slot.classList.add('done');
+        slot.innerHTML = `<img src="${base64Image}"><button class="rm" onclick="removerFoto('${fotoTipoAtual}')">✕</button>`;
       }
-      toast("Foto salva ✓");
-    }catch(err){
-      console.error("Erro na foto:",err);
-      toast("Não consegui salvar a foto. Tente de novo.");
     }
+
+    // 2. Apenas fecha o modal da câmera, MANTENDO o usuário na tela atual
+    fecharModal(); 
+    // REMOVIDO: showScreen('home'); 
   };
-}
-function removePhoto(key){
-  delete WZFOTOS[key];
-  renderWizard();
+
+  reader.readAsDataURL(file);
 }
 
 /* ============ DEVOLUÇÃO ============ */
