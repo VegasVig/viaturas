@@ -551,6 +551,41 @@ function photoGet(key){
   });
 }
 
+/* ---------- Rascunho de fotos do wizard (IndexedDB) ----------
+   As fotos da retirada/devolução são grandes (base64). Guardá-las dentro do
+   WZ no localStorage estoura o limite (~5MB) e faz o rascunho inteiro se
+   perder. Por isso, ao capturar, gravamos a imagem no IndexedDB e mantemos
+   no WZ apenas uma CHAVE leve (ex.: "draft_painel"). */
+function draftFotoPut(key,dataUrl){
+  return new Promise((res,rej)=>{
+    const tx=IDB.transaction("fotos","readwrite");
+    tx.objectStore("fotos").put(dataUrl,"draft_"+key);
+    tx.oncomplete=()=>res("draft_"+key); tx.onerror=rej;
+  });
+}
+function draftFotoGet(key){
+  return new Promise((res)=>{
+    if(!key){res(null);return;}
+    if(/^https?:\/\//.test(key)){ res(key); return; }
+    if(/^data:/.test(key)){ res(key); return; }   // compatibilidade c/ rascunhos antigos
+    const tx=IDB.transaction("fotos","readonly");
+    const rq=tx.objectStore("fotos").get(key);
+    rq.onsuccess=()=>res(rq.result||null); rq.onerror=()=>res(null);
+  });
+}
+function draftFotoDel(key){
+  return new Promise((res)=>{
+    if(!key||!/^draft_/.test(String(key))){res();return;}
+    try{ const tx=IDB.transaction("fotos","readwrite"); tx.objectStore("fotos").delete(key); tx.oncomplete=()=>res(); tx.onerror=()=>res(); }
+    catch(e){ res(); }
+  });
+}
+/* Resolve uma referência de foto do wizard para algo exibível numa <img>. */
+async function draftFotoResolve(ref){
+  if(!ref) return null;
+  return await draftFotoGet(ref);
+}
+
 /* ---------- Helpers ---------- */
 const $=(s,el=document)=>el.querySelector(s);
 const $$=(s,el=document)=>[...el.querySelectorAll(s)];
@@ -680,6 +715,12 @@ function enterApp(){
   $("#who-name").textContent=SESSION.nome;
   $("#who-role").textContent=SESSION.nivel;
   buildNav();
+  // Se a página recarregou no meio de uma retirada/devolução (comum quando o
+  // celular fecha o app ao abrir a câmera), retoma de onde parou em vez de
+  // voltar para o início — assim as fotos e o progresso não se perdem.
+  const draft=wzLoad();
+  if(draft && draft.mode==="retirada" && SESSION.tipo==="motorista"){ WZ=draft; renderWizard(); return; }
+  if(draft && draft.mode==="devolucao" && SESSION.tipo==="motorista"){ WZ=draft; renderDevWizard(); return; }
   const first=SESSION.tipo==="motorista"?"mot-home":"dashboard";
   go(first);
 }
@@ -1201,7 +1242,15 @@ const NIVEL_COMB=["Reserva","1/4","1/2","3/4","Cheio"];
 /* estado do wizard (rascunho salvo) */
 const WZ_KEY="vegasfrota_wizard_draft";
 let WZ=null;
-function wzSave(){ localStorage.setItem(WZ_KEY,JSON.stringify(WZ)); }
+function wzSave(){
+  try{ localStorage.setItem(WZ_KEY,JSON.stringify(WZ)); }
+  catch(e){
+    // Se o localStorage estourar, o rascunho não é salvo. Avisamos em vez de
+    // falhar em silêncio (era uma das causas de "perder" as fotos).
+    console.warn("Falha ao salvar rascunho:",e);
+    toast("Atenção: memória cheia ao salvar o progresso");
+  }
+}
 function wzLoad(){ try{return JSON.parse(localStorage.getItem(WZ_KEY));}catch(e){return null;} }
 function wzClear(){ localStorage.removeItem(WZ_KEY); WZ=null; }
 
@@ -1383,7 +1432,7 @@ function setChk(i,v){ WZ.checklist[i]=WZ.checklist[i]||{}; WZ.checklist[i].v=v; 
   });
 }
 function chkDesc(i,v){WZ.checklist[i]=WZ.checklist[i]||{};WZ.checklist[i].desc=v;wzSave();}
-function bindChkPhoto(i){ bindPhotoKey("chk"+i,(url)=>{WZ.checklist[i]=WZ.checklist[i]||{};WZ.checklist[i].foto=url;wzSave();}); }
+function bindChkPhoto(i){ bindPhotoKey("chk"+i,(ref)=>{WZ.checklist[i]=WZ.checklist[i]||{};WZ.checklist[i].foto=ref;wzSave();}, true); }
 
 /* etapa 6 - níveis água/óleo */
 function stNiveis(b){
@@ -1482,14 +1531,16 @@ function validateRetirada(){
 async function finalizarRetirada(){
   const v=veiculo(WZ.veiculoId);
   if(v.status!=="Disponível"){toast("Veículo não está mais disponível");return;}
-  // grava fotos no IndexedDB
+  // grava fotos no destino final (Drive/IndexedDB), lendo do rascunho
   const rid=uid("r");
-  const fotoRefs={};
-  for(const [k] of FOTOS_ITENS){ if(WZ.fotos[k]){const key=rid+"_ret_"+k;await photoPut(key,WZ.fotos[k]);fotoRefs[k]=key;} }
-  if(WZ.fotos.avaria){const key=rid+"_ret_avaria";await photoPut(key,WZ.fotos.avaria);fotoRefs.avaria=key;}
+  const fotoRefs={}; const rascunhos=[];
+  for(const [k] of FOTOS_ITENS){
+    if(WZ.fotos[k]){ const img=await draftFotoResolve(WZ.fotos[k]); if(img){const key=rid+"_ret_"+k; await photoPut(key,img); fotoRefs[k]=key; rascunhos.push(WZ.fotos[k]);} }
+  }
+  if(WZ.fotos.avaria){ const img=await draftFotoResolve(WZ.fotos.avaria); if(img){const key=rid+"_ret_avaria"; await photoPut(key,img); fotoRefs.avaria=key; rascunhos.push(WZ.fotos.avaria);} }
   // checklist com fotos
   const chk={};
-  for(const i in WZ.checklist){ const c={...WZ.checklist[i]}; if(c.foto){const key=rid+"_ret_chk"+i;await photoPut(key,c.foto);c.foto=key;} chk[i]=c; }
+  for(const i in WZ.checklist){ const c={...WZ.checklist[i]}; if(c.foto){const img=await draftFotoResolve(c.foto); if(img){const key=rid+"_ret_chk"+i; await photoPut(key,img); rascunhos.push(c.foto); c.foto=key;}} chk[i]=c; }
 
   const reg={id:rid,veiculoId:WZ.veiculoId,motoristaId:WZ.motoristaId,
     destinoId:WZ.destinoId,destinoNome:WZ.destinoNome,finalidade:WZ.finalidade,
@@ -1507,7 +1558,9 @@ async function finalizarRetirada(){
       data:nowISO(),local:WZ.destinoNome,descricao:WZ.avaria.desc+" | Áreas: "+WZ.avaria.areas.join(", "),status:"Aberta",fotos:fotoRefs.avaria?[fotoRefs.avaria]:[]});
   }
   log("Retirou viatura",v.interno);
-  saveSync(["retiradas","veiculos","ocorrencias","auditoria"]); wzClear();
+  saveSync(["retiradas","veiculos","ocorrencias","auditoria"]);
+  for(const r of rascunhos){ await draftFotoDel(r); }
+  wzClear();
   showComprovanteRet(reg);
 }
 
@@ -1534,31 +1587,45 @@ function showComprovanteRet(reg){
 /* ============ helpers de foto no wizard ============ */
 function photoSlotHTML(key,label,em,val){
   const has=!!val;
+  // Quando há foto, renderizamos o slot no estado "com foto" e carregamos a
+  // imagem do IndexedDB de forma assíncrona (val é uma chave leve, não a img).
+  const inner = has
+    ? `<img id="img-${key}" alt=""><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ ${esc(label)}</span>`
+    : `<span class="em">${em}</span><span>${esc(label)}</span><span style="font-size:11px;color:var(--muted2)">Toque para tirar a foto agora</span>`;
+  if(has){
+    // carrega a imagem depois que o HTML entrar no DOM
+    setTimeout(()=>{ draftFotoResolve(val).then(u=>{ const im=$("#img-"+key); if(im&&u) im.src=u; }); },0);
+  }
   return `<div class="photo-slot ${has?"done":""}" id="slot-${key}" onclick="triggerPhoto('${key}')">
     <input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none">
-    ${has?`<img src="${val}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ ${esc(label)}</span>`
-      :`<span class="em">${em}</span><span>${esc(label)}</span><span style="font-size:11px;color:var(--muted2)">Toque para tirar a foto agora</span>`}
+    ${inner}
   </div>`;
 }
 function triggerPhoto(key){ $("#file-"+key)?.click(); }
-function bindPhoto(key){ bindPhotoKey(key,(url)=>{WZ.fotos[key]=url;wzSave();}); }
-function bindPhotoKey(key,cb){
+/* Foto do wizard: grava no IndexedDB na hora e guarda no WZ apenas a chave. */
+function bindPhoto(key){ bindPhotoKey(key, (ref)=>{ WZ.fotos[key]=ref; wzSave(); }, true); }
+function bindPhotoKey(key,cb,persist){
   const inp=$("#file-"+key); if(!inp)return;
   inp.onchange=async e=>{
     const f=e.target.files[0]; if(!f)return;
     toast("Processando foto...");
-    const url=await compressImage(f);
-    cb(url);
+    const dataUrl=await compressImage(f);
+    let ref=dataUrl, exibir=dataUrl;
+    if(persist){
+      // grava a imagem no IndexedDB imediatamente (aguenta MBs) e usa a chave
+      try{ ref=await draftFotoPut(key,dataUrl); }catch(err){ console.warn("draftFotoPut falhou:",err); ref=dataUrl; }
+    }
+    cb(ref);
     const slot=$("#slot-"+key);
     if(slot){slot.classList.add("done");
-      slot.innerHTML=`<input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none"><img src="${url}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ Foto</span>`;
-      bindPhotoKey(key,cb);
+      slot.innerHTML=`<input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none"><img src="${exibir}" alt=""><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ Foto</span>`;
+      bindPhotoKey(key,cb,persist);
     }
   };
 }
-function removePhoto(key){
-  if(key.startsWith("chk")){const i=+key.slice(3);if(WZ.checklist[i])delete WZ.checklist[i].foto;}
-  else delete WZ.fotos[key];
+async function removePhoto(key){
+  if(key.startsWith("chk")){const i=+key.slice(3);if(WZ.checklist[i]){await draftFotoDel(WZ.checklist[i].foto);delete WZ.checklist[i].foto;}}
+  else { await draftFotoDel(WZ.fotos[key]); delete WZ.fotos[key]; }
   wzSave(); renderWizard();
 }
 
@@ -1670,10 +1737,10 @@ function dvFinal(b){
 async function finalizarDevolucao(){
   const r=DB.retiradas.find(x=>x.id===WZ.retiradaId),v=veiculo(WZ.veiculoId);
   const did=uid("dev");
-  const fotoRefs={};
-  for(const [k] of FOTOS_ITENS){if(WZ.fotos[k]){const key=did+"_dev_"+k;await photoPut(key,WZ.fotos[k]);fotoRefs[k]=key;}}
+  const fotoRefs={}; const rascunhos=[];
+  for(const [k] of FOTOS_ITENS){if(WZ.fotos[k]){const img=await draftFotoResolve(WZ.fotos[k]); if(img){const key=did+"_dev_"+k;await photoPut(key,img);fotoRefs[k]=key;rascunhos.push(WZ.fotos[k]);}}}
   const chk={};
-  for(const i in WZ.checklist){const c={...WZ.checklist[i]};if(c.foto){const key=did+"_dev_chk"+i;await photoPut(key,c.foto);c.foto=key;}chk[i]=c;}
+  for(const i in WZ.checklist){const c={...WZ.checklist[i]};if(c.foto){const img=await draftFotoResolve(c.foto); if(img){const key=did+"_dev_chk"+i;await photoPut(key,img);rascunhos.push(c.foto);c.foto=key;}}chk[i]=c;}
   const perc=(+WZ.kmFinal)-r.kmInicial;
   const dev={id:did,retiradaId:r.id,veiculoId:v.id,motoristaId:r.motoristaId,
     kmFinal:+WZ.kmFinal,kmPercorrido:perc,checklist:chk,fotos:fotoRefs,
@@ -1683,12 +1750,14 @@ async function finalizarDevolucao(){
   v.status="Disponível"; v.km=+WZ.kmFinal;
   if(WZ.ocorrencia.tem){
     const oid=uid("o"); let ofoto=[];
-    if(WZ.fotos.occ){const key=oid+"_occ";await photoPut(key,WZ.fotos.occ);ofoto=[key];}
+    if(WZ.fotos.occ){const img=await draftFotoResolve(WZ.fotos.occ); if(img){const key=oid+"_occ";await photoPut(key,img);ofoto=[key];rascunhos.push(WZ.fotos.occ);}}
     DB.ocorrencias.push({id:oid,veiculoId:v.id,motoristaId:r.motoristaId,tipo:WZ.ocorrencia.tipo,
       data:nowISO(),local:r.destinoNome,descricao:WZ.ocorrencia.desc,status:"Aberta",fotos:ofoto});
   }
   log("Devolveu viatura",v.interno+" (percorrido "+perc+" km)");
-  saveSync(["devolucoes","veiculos","ocorrencias","auditoria"]);wzClear();
+  saveSync(["devolucoes","veiculos","ocorrencias","auditoria"]);
+  for(const rr of rascunhos){ await draftFotoDel(rr); }
+  wzClear();
   const m=motorista(r.motoristaId);
   $("#view").innerHTML=`<div class="wizard-body"><div class="card receipt">
     <div class="big-em">🟢</div><h3>Devolução finalizada</h3>
