@@ -352,13 +352,16 @@ const SEED_USUARIOS = [
    ============================================================ */
 
 /* URL do App da Web publicado no Apps Script (termina em /exec).
-   Fica salva no localStorage para você configurar 1x pela tela de ajustes. */
+   Já vem embutida no app: cada aparelho conecta automaticamente ao banco
+   central, sem precisar colar a URL manualmente. Se um dia mudar a
+   implantação, basta trocar a URL abaixo. */
+const API_URL_PADRAO = "https://script.google.com/macros/s/AKfycbw7Fven1E1nYcX1fdbxytGl8JAhAlQbueFzEPBvCRaLcXhUz45CmKsSSYHyUSLuYuCw/exec";
 const API_KEY_STORE = "vegasfrota_api_url";
-let API_URL = localStorage.getItem(API_KEY_STORE) || "";
+let API_URL = localStorage.getItem(API_KEY_STORE) || API_URL_PADRAO;
 
 function apiConfigurada(){ return !!API_URL; }
 function setApiUrl(u){
-  API_URL=(u||"https://script.google.com/macros/s/AKfycbw7Fven1E1nYcX1fdbxytGl8JAhAlQbueFzEPBvCRaLcXhUz45CmKsSSYHyUSLuYuCw/exec").trim();
+  API_URL=(u||API_URL_PADRAO).trim();
   localStorage.setItem(API_KEY_STORE, API_URL);
 }
 
@@ -1001,7 +1004,7 @@ ROUTES["veiculo-det"]=async(el,id)=>{
       ${stat("🛣️","KM percorridos",fmtKm(kmPerc),"blue")}
     </div>
     <div class="grid g2" style="margin-top:12px">
-      ${stat("📈","Consumo médio",consumo?consumo.toFixed(2)+" km/L":"—","green")}
+      ${stat("📈","Consumo médio",consumo?consumo.toFixed(2)+" km/"+unidadeComb(v.combustivel):"—","green")}
       ${stat("🧮","Custo por KM",custoKm?fmtMoney(custoKm)+"/km":"—","")}
     </div>
 
@@ -1020,7 +1023,7 @@ function renderTimeline(box,vid){
   const ev=[];
   DB.retiradas.filter(r=>r.veiculoId===vid).forEach(r=>ev.push({d:r.data,em:"🚗",t:"Retirada",s:`${motorista(r.motoristaId)?.nome||"—"} · KM ${fmtNum(r.kmInicial)} · ${esc(r.destinoNome)}`}));
   DB.devolucoes.filter(x=>x.veiculoId===vid).forEach(x=>ev.push({d:x.data,em:"🔄",t:"Devolução",s:`KM ${fmtNum(x.kmFinal)} · percorrido ${fmtNum(x.kmPercorrido)} km`}));
-  DB.abastecimentos.filter(a=>a.veiculoId===vid).forEach(a=>ev.push({d:a.data,em:"⛽",t:"Abastecimento",s:`${a.litros} L · ${fmtMoney(a.total)}`}));
+  DB.abastecimentos.filter(a=>a.veiculoId===vid).forEach(a=>ev.push({d:a.data,em:"⛽",t:"Abastecimento",s:`${a.litros} ${unidadeAbast(a)} · ${fmtMoney(a.total)}`}));
   DB.manutencoes.filter(m=>m.veiculoId===vid).forEach(m=>ev.push({d:m.data,em:"🔧",t:"Manutenção — "+esc(m.tipo),s:`${esc(m.descricao||"")} · ${fmtMoney(m.valor)}`}));
   DB.ocorrencias.filter(o=>o.veiculoId===vid).forEach(o=>ev.push({d:o.data,em:"⚠️",t:"Ocorrência — "+esc(o.tipo),s:esc(o.descricao||"")}));
   ev.sort((a,b)=>new Date(b.d)-new Date(a.d));
@@ -1532,9 +1535,9 @@ function showComprovanteRet(reg){
 function photoSlotHTML(key,label,em,val){
   const has=!!val;
   return `<div class="photo-slot ${has?"done":""}" id="slot-${key}" onclick="triggerPhoto('${key}')">
-    <input type="file" accept="image/*" id="file-${key}" style="display:none">
+    <input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none">
     ${has?`<img src="${val}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ ${esc(label)}</span>`
-      :`<span class="em">${em}</span><span>${esc(label)}</span><span style="font-size:11px;color:var(--muted2)">Toque: câmera ou galeria</span>`}
+      :`<span class="em">${em}</span><span>${esc(label)}</span><span style="font-size:11px;color:var(--muted2)">Toque para tirar a foto agora</span>`}
   </div>`;
 }
 function triggerPhoto(key){ $("#file-"+key)?.click(); }
@@ -1548,7 +1551,7 @@ function bindPhotoKey(key,cb){
     cb(url);
     const slot=$("#slot-"+key);
     if(slot){slot.classList.add("done");
-      slot.innerHTML=`<input type="file" accept="image/*" id="file-${key}" style="display:none"><img src="${url}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ Foto</span>`;
+      slot.innerHTML=`<input type="file" accept="image/*" capture="environment" id="file-${key}" style="display:none"><img src="${url}"><button class="rm" onclick="event.stopPropagation();removePhoto('${key}')">✕</button><span class="badge">✓ Foto</span>`;
       bindPhotoKey(key,cb);
     }
   };
@@ -1715,7 +1718,7 @@ ROUTES["mot-abast"]=ROUTES.abastecimentos=(el)=>{
   $("#ab-list").innerHTML=arr.length?arr.map(a=>{
     const v=veiculo(a.veiculoId);
     return `<div class="row-item"><div class="av">⛽</div>
-      <div class="main"><div class="t">${esc(v?.interno||"—")} · ${a.litros} L</div>
+      <div class="main"><div class="t">${esc(v?.interno||"—")} · ${a.litros} ${unidadeAbast(a)}</div>
       <div class="s">${dtBR(a.data)} · ${esc(a.posto||"")} · ${fmtMoney(a.total)}</div></div>
       <span class="tag gold">${a.tanqueCheio?"Tanque cheio":""}</span></div>`;
   }).join(""):'<div class="empty"><div class="em">⛽</div>Nenhum abastecimento</div>';
@@ -1729,9 +1732,9 @@ function formAbastecimento(){
     <div class="two"><div><label>Data</label><input id="ab-data" type="datetime-local" value="${new Date().toISOString().slice(0,16)}"></div>
       <div><label>KM</label><input id="ab-km" type="number" inputmode="numeric"></div></div>
     <label>Posto</label><input id="ab-posto">
-    <label>Combustível</label><select id="ab-comb">${["Gasolina","Etanol","Diesel","GNV"].map(o=>`<option>${o}</option>`).join("")}</select>
-    <div class="two"><div><label>Litros</label><input id="ab-litros" type="number" step="0.01" inputmode="decimal" oninput="calcAbast()"></div>
-      <div><label>Valor por litro (R$)</label><input id="ab-vl" type="number" step="0.01" inputmode="decimal" oninput="calcAbast()"></div></div>
+    <label>Combustível</label><select id="ab-comb" onchange="ajustaUnidadeComb()">${["Gasolina","Etanol","Diesel","GNV"].map(o=>`<option>${o}</option>`).join("")}</select>
+    <div class="two"><div><label id="ab-lbl-qtd">Litros</label><input id="ab-litros" type="number" step="0.01" inputmode="decimal" oninput="calcAbast()"></div>
+      <div><label id="ab-lbl-vl">Valor por litro (R$)</label><input id="ab-vl" type="number" step="0.01" inputmode="decimal" oninput="calcAbast()"></div></div>
     <div class="rec-lines" style="margin:12px 0 4px"><div class="rl"><span>Total</span><b id="ab-total">R$ 0,00</b></div></div>
     <label>Tanque cheio?</label><div class="fuel-row" style="max-width:200px"><button type="button" class="on" id="ab-tc-sim" onclick="setTanque(true)">Sim</button><button type="button" id="ab-tc-nao" onclick="setTanque(false)">Não</button></div>
     <label style="margin-top:12px">Foto do cupom</label>${photoSlotHTML("cupom","Cupom fiscal","🧾")}
@@ -1739,6 +1742,18 @@ function formAbastecimento(){
       <button class="btn" onclick="saveAbastecimento()">Salvar</button></div>`);
   window._tanque=true;
   bindPhotoKey("cupom",u=>{window._cupom=u;});
+  ajustaUnidadeComb();
+}
+/* GNV é medido em metro cúbico (m³); os demais em litro (L). */
+function unidadeComb(comb){ return comb==="GNV" ? "m³" : "L"; }
+/* Unidade de um abastecimento já registrado (registros antigos = L). */
+function unidadeAbast(a){ return a.unidade || unidadeComb(a.combustivel); }
+function ajustaUnidadeComb(){
+  const comb=$("#ab-comb")?.value||"";
+  const u=unidadeComb(comb);
+  const lq=$("#ab-lbl-qtd"), lv=$("#ab-lbl-vl");
+  if(lq) lq.textContent = u==="m³" ? "Metros cúbicos (m³)" : "Litros";
+  if(lv) lv.textContent = "Valor por "+u+" (R$)";
 }
 function setTanque(v){window._tanque=v;$("#ab-tc-sim").classList.toggle("on",v);$("#ab-tc-nao").classList.toggle("on",!v);}
 function calcAbast(){const l=+$("#ab-litros").value||0,vl=+$("#ab-vl").value||0;$("#ab-total").textContent=fmtMoney(l*vl);}
@@ -1746,14 +1761,15 @@ async function saveAbastecimento(){
   const g=k=>$("#ab-"+k).value;
   if(!g("veic")){toast("Selecione o veículo");return;}
   const litros=+g("litros")||0,vl=+g("vl")||0;
-  if(!litros){toast("Informe os litros");return;}
+  const unidade=unidadeComb(g("comb"));
+  if(!litros){toast("Informe a quantidade ("+unidade+")");return;}
   const id=uid("ab"); let cupomRef=null;
   if(window._cupom){cupomRef=id+"_cupom";await photoPut(cupomRef,window._cupom);}
   DB.abastecimentos.push({id,veiculoId:g("veic"),motoristaId:g("mot"),
     data:g("data")?new Date(g("data")).toISOString():nowISO(),km:+g("km")||0,posto:g("posto"),
-    combustivel:g("comb"),litros,valorLitro:vl,total:litros*vl,tanqueCheio:window._tanque,cupom:cupomRef});
+    combustivel:g("comb"),litros,unidade,valorLitro:vl,total:litros*vl,tanqueCheio:window._tanque,cupom:cupomRef});
   const v=veiculo(g("veic")); if(g("km")&&+g("km")>v.km)v.km=+g("km");
-  log("Registrou abastecimento",v.interno+" "+litros+"L");
+  log("Registrou abastecimento",v.interno+" "+litros+unidade);
   window._cupom=null;saveSync(["abastecimentos"]);closeModal();toast("Abastecimento registrado");
   go(SESSION.tipo==="motorista"?"mot-abast":"abastecimentos");
 }
@@ -2056,10 +2072,10 @@ function gerarRelatorio(tipo){
       const v=veiculo(r.veiculoId),m=motorista(r.motoristaId),dev=DB.devolucoes.find(d=>d.id===r.devolucaoId);
       rows.push([dtBR(r.data),v?.interno||"",m?.nome||"",r.destinoNome,r.kmInicial,dev?.kmFinal||"",dev?.kmPercorrido||"",r.devolvida?"Devolvido":"Em uso"]);});
   } else if(tipo==="abastecimento"){
-    title="Relatório de Abastecimento";head=["Data","Veículo","Motorista","Posto","Litros","R$/L","Total"];
+    title="Relatório de Abastecimento";head=["Data","Veículo","Motorista","Posto","Combustível","Qtd.","Unid.","R$/un.","Total"];
     DB.abastecimentos.filter(a=>f.test(a.data,a.veiculoId,a.motoristaId)).forEach(a=>{
       const v=veiculo(a.veiculoId),m=motorista(a.motoristaId);
-      rows.push([dtBR(a.data),v?.interno||"",m?.nome||"",a.posto,a.litros,a.valorLitro,a.total]);});
+      rows.push([dtBR(a.data),v?.interno||"",m?.nome||"",a.posto,a.combustivel||"",a.litros,unidadeAbast(a),a.valorLitro,a.total]);});
   } else if(tipo==="gastos"){
     title="Relatório de Gastos";head=["Veículo","Combustível","Manutenção","Total","KM","Custo/km"];
     DB.veiculos.filter(v=>!f.vid||v.id===f.vid).forEach(v=>{const s=veiculoStats(v.id);
