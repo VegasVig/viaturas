@@ -45,8 +45,23 @@ function primeiraInstalacao(){
 
 function pastaFotos_(){
   var it = DriveApp.getFoldersByName(PASTA_FOTOS);
-  if(it.hasNext()) return it.next();
-  return DriveApp.createFolder(PASTA_FOTOS);
+  var pasta = it.hasNext() ? it.next() : DriveApp.createFolder(PASTA_FOTOS);
+  // garante que a pasta é pública para leitura (fotos abrem em qualquer aparelho)
+  try{ pasta.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); }catch(e){}
+  return pasta;
+}
+
+/* ===== TESTE RÁPIDO (rode no editor do Apps Script) =====
+   Cria uma foto de teste e devolve o link. Depois de rodar:
+   1) veja no "Registro de execução" o link gerado;
+   2) cole o link no navegador — deve abrir a imagem (um quadrado colorido).
+   Se abrir, o backend está correto. */
+function testarFoto(){
+  // 1x1 pixel PNG vermelho em base64
+  var dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  var url = salvarFoto_("TESTE_"+new Date().getTime(), dataUrl);
+  Logger.log("Link da foto de teste: " + url);
+  return url;
 }
 
 // ====== ROTEADOR HTTP ======
@@ -165,6 +180,7 @@ function salvarFoto_(nome, dataUrl){
   var blob = Utilities.newBlob(bytes, tipo, nome+".jpg");
   var arq = pasta.createFile(blob);
   arq.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-  // link direto de imagem
-  return "https://drive.google.com/uc?export=view&id="+arq.getId();
+  // Link que funciona diretamente em <img> (o formato antigo uc?export=view
+  // foi descontinuado pelo Google e não carrega mais em tags de imagem).
+  return "https://lh3.googleusercontent.com/d/" + arq.getId();
 }
