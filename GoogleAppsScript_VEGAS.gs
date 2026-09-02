@@ -92,6 +92,16 @@ function handle_(e){
       (body.itens||[]).forEach(function(it){ upsert_(it.aba, it.registro); });
       out = {ok:true};
     }
+    else if(acao==="apagar"){               // apaga um registro por id
+      // body: {aba, id}
+      apagar_(body.aba, body.id);
+      out = {ok:true};
+    }
+    else if(acao==="substituirTabela"){     // troca a tabela inteira de uma vez
+      // body: {aba, registros:[...]}  -> apaga tudo e regrava só o que veio
+      substituirTabela_(body.aba, body.registros||[]);
+      out = {ok:true};
+    }
     else if(acao==="setSeq"){
       setMeta_("_seq", {v: body.v});
       out = {ok:true};
@@ -149,6 +159,31 @@ function upsert_(aba, reg){
     }
   }
   sh.appendRow([id, JSON.stringify(reg)]);
+}
+
+/* Apaga um registro pelo id (remove a linha da planilha). */
+function apagar_(aba, id){
+  if(ABAS.indexOf(aba)<0) throw "aba inválida: "+aba;
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(aba);
+  var last = sh.getLastRow();
+  if(last<=1) return;
+  var ids = sh.getRange(2,1,last-1,1).getValues();
+  for(var i=ids.length-1;i>=0;i--){          // de baixo p/ cima ao apagar
+    if(String(ids[i][0])===String(id)){ sh.deleteRow(i+2); }
+  }
+}
+
+/* Substitui a tabela inteira: apaga todas as linhas de dados e regrava
+   apenas os registros enviados. Ideal para corrigir a lista de motoristas
+   de uma vez, para todos os aparelhos (o banco central fica correto). */
+function substituirTabela_(aba, registros){
+  if(ABAS.indexOf(aba)<0) throw "aba inválida: "+aba;
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(aba);
+  var last = sh.getLastRow();
+  if(last>1){ sh.deleteRows(2, last-1); }     // apaga tudo menos o cabeçalho
+  (registros||[]).forEach(function(reg){
+    if(reg && reg.id!=null){ sh.appendRow([reg.id, JSON.stringify(reg)]); }
+  });
 }
 
 function getMeta_(chave){
