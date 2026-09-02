@@ -318,40 +318,12 @@ tr:last-child td{border-bottom:0}
 /* ===== DADOS INICIAIS — VEGAS FROTA ===== */
 /* Motoristas (das imagens + novos), em ordem alfabética */
 const SEED_MOTORISTAS = [
-  [
-  "Adriano Dias",
-  "Alberto",
-  "André",
-  "Caio",
-  "Daniel Martins",
-  "Derlan",
-  "Diego",
-  "Eder",
-  "Fabricio",
-  "Flavio",
-  "Gabriel",
-  "Genivaldo",
-  "Guilherme",
-  "Joao Gabriel",
-  "Jorge",
-  "Josias",
-  "Kelson",
-  "Luiz Fernando",
-  "Manoel",
-  "Marcelo",
-  "Marco",
-  "Mario",
-  "Matheus",
-  "Matusalem",
-  "Rafael Carlos",
-  "Rafael Francis",
-  "Rodrigo",
-  "Rosana",
-  "Samuel",
-  "Tiago",
-  "Wanderson",
-  "Willian"
-]
+  "Adriano Dias","Alberto e Gabriel","André","Caio",
+  "Daniel Martins e João Vitor","Derlan e Joao Gabriel","Diego e Jorge",
+  "Eder","Fabricio","Flavio e Manoel","Genivaldo","Guilherme",
+  "Josias e Rosana","Kelson","Luiz Fernando e Matheus","Marcelo",
+  "Marco","Mario","Matusalem","Rafael Carlos e Wanderson",
+  "Rafael Francis","Samuel","Tiago","Willian, Rodrigo e Yan"
 ].map((nome,i)=>({
   id:"m"+(i+1),
   nome,
@@ -408,7 +380,7 @@ const SEED_USUARIOS = [
    Já vem embutida no app: cada aparelho conecta automaticamente ao banco
    central, sem precisar colar a URL manualmente. Se um dia mudar a
    implantação, basta trocar a URL abaixo. */
-const API_URL_PADRAO = "https://script.google.com/macros/s/AKfycbwFz7gq5CRPBkq0KadTMgCgTjvzugAgQG_DOg1Uwdnz9RVbpU8bSfnFInyRXfJrPofq/exec";
+const API_URL_PADRAO = "https://script.google.com/macros/s/AKfycbw7Fven1E1nYcX1fdbxytGl8JAhAlQbueFzEPBvCRaLcXhUz45CmKsSSYHyUSLuYuCw/exec";
 const API_KEY_STORE = "vegasfrota_api_url";
 let API_URL = localStorage.getItem(API_KEY_STORE) || API_URL_PADRAO;
 
@@ -513,8 +485,17 @@ async function filaSincronizar(){
    Substitui o antigo photoPut quando a API está configurada. */
 async function nuvemFoto(nome, dataUrl){
   if(!API_URL) return null;
-  const j=await api("foto",{nome, dataUrl});
-  return j.url||null;
+  // tenta até 3x: o Apps Script às vezes recusa chamadas em sequência rápida
+  let ultimoErro=null;
+  for(let tentativa=1; tentativa<=3; tentativa++){
+    try{
+      const j=await api("foto",{nome, dataUrl});
+      if(j && j.url) return j.url;
+    }catch(e){ ultimoErro=e; }
+    await new Promise(r=>setTimeout(r, 400*tentativa));   // espera crescente antes de tentar de novo
+  }
+  if(ultimoErro) console.warn("nuvemFoto falhou após 3 tentativas:", ultimoErro.message);
+  return null;
 }
 
 /* Sincroniza tabelas de movimento inteiras (usado após operações em lote). */
@@ -1721,10 +1702,15 @@ async function finalizarRetirada(){
   if(v.status!=="Disponível"){toast("Veículo não está mais disponível");return;}
   const rid=uid("r");
   const fotoRefs={};
-  for(const [k] of FOTOS_ITENS){ if(WZ.fotos[k]){const key=rid+"_ret_"+k;await photoPut(key,WZ.fotos[k]);fotoRefs[k]=key;} }
-  if(WZ.fotos.avaria){const key=rid+"_ret_avaria";await photoPut(key,WZ.fotos.avaria);fotoRefs.avaria=key;}
+  let soLocal=0, totalFotos=0;
+  const guarda=async(key,dataUrl)=>{ totalFotos++; const ref=await photoPut(key,dataUrl); if(!/^https?:\/\//.test(ref)) soLocal++; return ref; };
+  for(const [k] of FOTOS_ITENS){ if(WZ.fotos[k]){const key=rid+"_ret_"+k;fotoRefs[k]=await guarda(key,WZ.fotos[k]);} }
+  if(WZ.fotos.avaria){const key=rid+"_ret_avaria";fotoRefs.avaria=await guarda(key,WZ.fotos.avaria);}
   const chk={};
-  for(const i in WZ.checklist){ const c={...WZ.checklist[i]}; if(c.foto){const key=rid+"_ret_chk"+i;await photoPut(key,c.foto);c.foto=key;} chk[i]=c; }
+  for(const i in WZ.checklist){ const c={...WZ.checklist[i]}; if(c.foto){const key=rid+"_ret_chk"+i;c.foto=await guarda(key,c.foto);} chk[i]=c; }
+  if(apiConfigurada() && soLocal>0){
+    toast("⚠ "+soLocal+" de "+totalFotos+" fotos não subiram à nuvem — ficaram no aparelho");
+  }
 
   const reg={id:rid,veiculoId:WZ.veiculoId,motoristaId:WZ.motoristaId,
     destinoId:WZ.destinoId,destinoNome:WZ.destinoNome,finalidade:WZ.finalidade,
@@ -1824,8 +1810,8 @@ function capturarFoto(){
   const v=$("#cam-video");
   if(!v || !v.videoWidth){ toast("Aguarde a câmera carregar"); return; }
   const key=CAM.key;
-  // desenha o quadro no canvas, reduzindo para largura máx. 1280
-  const maxW=1280;
+  // desenha o quadro no canvas, reduzindo para largura máx. 900 (mais leve p/ subir)
+  const maxW=900;
   let w=v.videoWidth, h=v.videoHeight;
   if(w>maxW){ h=Math.round(h*maxW/w); w=maxW; }
   const c=$("#cam-canvas"); c.width=w; c.height=h;
@@ -1835,7 +1821,7 @@ function capturarFoto(){
   const agora=new Date();
   const carimbo=agora.toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit",second:"2-digit"});
   const texto="VEGAS FROTA · "+carimbo;
-  const fs=Math.max(16, Math.round(w*0.032));   // tamanho da fonte proporcional
+  const fs=Math.max(15, Math.round(w*0.034));   // tamanho da fonte proporcional
   ctx.font="bold "+fs+"px Arial";
   ctx.textBaseline="bottom";
   const padY=Math.round(fs*0.5), barH=fs+padY*2;
@@ -1845,7 +1831,7 @@ function capturarFoto(){
   // texto dourado
   ctx.fillStyle="#e9c66a";
   ctx.fillText(texto, Math.round(fs*0.4), h-padY);
-  const dataUrl=c.toDataURL("image/jpeg", .72);
+  const dataUrl=c.toDataURL("image/jpeg", .62);   // mais compressão = arquivo menor
   // entrega para quem pediu a foto
   const cb=PHOTO_CB[key];
   fecharCamera();
