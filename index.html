@@ -453,7 +453,19 @@ async function api(acao, payload){
 async function apiPing(){ return api("ping"); }
 
 /* Baixa TODO o banco da planilha e substitui o DB local. */
+/* Tabelas de movimento: nunca podem perder registro local que ainda não
+   chegou à planilha (era isso que apagava retiradas recém-feitas). */
+const TABELAS_MOV=["retiradas","devolucoes","abastecimentos","manutencoes","ocorrencias","auditoria"];
+
 async function nuvemPull(){
+  // 1) antes de baixar, tenta enviar o que está pendente neste aparelho
+  try{ await filaSincronizar(); }catch(e){}
+  // 2) guarda os registros locais que ainda NÃO foram confirmados na nuvem
+  const hashes=syncHashes();
+  const pendentes={};
+  TABELAS_MOV.forEach(aba=>{
+    pendentes[aba]=(DB[aba]||[]).filter(r=>r && r.id!=null && hashes[aba]?.[r.id]!==hashReg(r));
+  });
   const j = await api("pull");
   if(j.db){
     // preserva seeds locais caso a planilha esteja vazia (primeira vez)
@@ -469,9 +481,28 @@ async function nuvemPull(){
       manutencoes: remoto.manutencoes||[],
       ocorrencias: remoto.ocorrencias||[],
       auditoria: remoto.auditoria||[],
-      _seq: remoto._seq||100
+      _seq: Math.max(remoto._seq||100, DB._seq||100)
     };
+    // 3) marca como sincronizado tudo que veio da planilha
+    const novos={};
+    Object.keys(DB).forEach(aba=>{
+      if(!Array.isArray(DB[aba])) return;
+      novos[aba]={};
+      (remoto[aba]||[]).forEach(r=>{ if(r && r.id!=null) novos[aba][r.id]=hashReg(r); });
+    });
+    // 4) devolve ao banco os registros locais que a planilha ainda não tem
+    const reenviar=new Set();
+    TABELAS_MOV.forEach(aba=>{
+      (pendentes[aba]||[]).forEach(loc=>{
+        const i=DB[aba].findIndex(x=>String(x.id)===String(loc.id));
+        if(i<0){ DB[aba].push(loc); reenviar.add(aba); }
+        else if(aba==="retiradas" && loc.devolvida && !DB[aba][i].devolvida){ DB[aba][i]=loc; reenviar.add(aba); }
+      });
+    });
+    DB.retiradas.forEach(limparRegistro);
+    localStorage.setItem(SYNC_HASH_KEY, JSON.stringify(novos));
     save(); // atualiza cache local
+    reenviar.forEach(aba=>{ Promise.resolve(nuvemPushTabela(aba)).catch(()=>{}); });
     // se a planilha estava vazia, sobe os seeds iniciais
     if(!remoto.motoristas?.length){ await nuvemSemear(); }
   }
@@ -512,16 +543,25 @@ function filaAdd(aba,registro){
   f.push({aba,registro,ts:Date.now()});
   localStorage.setItem(FILA_KEY,JSON.stringify(f));
 }
+let FILA_RODANDO=false;
 async function filaSincronizar(){
-  if(!API_URL) return;
+  if(!API_URL || FILA_RODANDO) return;
   let f=JSON.parse(localStorage.getItem(FILA_KEY)||"[]");
   if(!f.length) return;
+  FILA_RODANDO=true;
+  // mantém só a versão mais recente de cada registro
+  const mapa=new Map();
+  f.forEach(it=>{ if(it && it.registro) mapa.set(it.aba+"|"+it.registro.id, it); });
   const restantes=[];
-  for(const item of f){
-    try{ await api("push",{aba:item.aba,registro:item.registro}); }
-    catch(e){ restantes.push(item); }
-  }
-  localStorage.setItem(FILA_KEY,JSON.stringify(restantes));
+  try{
+    for(const item of mapa.values()){
+      try{ await api("push",{aba:item.aba,registro:limparRegistro(item.registro)}); marcarSync(item.aba,[item.registro]); }
+      catch(e){ restantes.push(item); }
+    }
+  } finally { FILA_RODANDO=false; }
+  // o que entrou na fila enquanto enviávamos também é preservado
+  const novosNaFila=JSON.parse(localStorage.getItem(FILA_KEY)||"[]").slice(f.length);
+  localStorage.setItem(FILA_KEY,JSON.stringify(restantes.concat(novosNaFila)));
   if(f.length && !restantes.length) toast("Dados pendentes sincronizados ✓");
 }
 
@@ -543,14 +583,57 @@ async function nuvemFoto(nome, dataUrl){
 }
 
 /* Sincroniza tabelas de movimento inteiras (usado após operações em lote). */
+/* ---- Controle do que já está confirmado na planilha ----
+   Guarda um "hash" de cada registro já gravado. Assim cada salvamento envia
+   SÓ o que mudou (antes reenviava a tabela inteira a cada ação, o que ficava
+   lento, estourava o tempo e falhava em silêncio). */
+const SYNC_HASH_KEY="vegasfrota_sync_hash";
+function syncHashes(){ try{ return JSON.parse(localStorage.getItem(SYNC_HASH_KEY)||"{}"); }catch(e){ return {}; } }
+function hashReg(r){
+  const t=JSON.stringify(r); let h=0;
+  for(let i=0;i<t.length;i++){ h=((h<<5)-h+t.charCodeAt(i))|0; }
+  return h+":"+t.length;
+}
+function marcarSync(aba,regs){
+  const hs=syncHashes(); hs[aba]=hs[aba]||{};
+  regs.forEach(r=>{ if(r && r.id!=null) hs[aba][r.id]=hashReg(r); });
+  localStorage.setItem(SYNC_HASH_KEY, JSON.stringify(hs));
+}
+/* Remove fotos em base64 de dentro dos registros. A foto já foi salva no
+   Drive/aparelho e o registro guarda só a referência. Base64 dentro do
+   registro passava do limite de 50.000 caracteres por célula da planilha
+   e a retirada inteira era recusada. */
+function limparRegistro(r){
+  if(r && r.avaria && Array.isArray(r.avaria.fotos) && r.avaria.fotos.length){ delete r.avaria.fotos; }
+  return r;
+}
+const PUSH_EM_ANDAMENTO={};
 async function nuvemPushTabela(aba){
   if(!API_URL) return;
-  const dados=DB[aba]||[];
-  for(let i=0;i<dados.length;i+=40){
-    try{ await api("pushMuitos",{itens:dados.slice(i,i+40).map(r=>({aba,registro:r}))}); }
-    catch(e){ console.warn("push tabela falhou",aba,e.message); }
+  if(PUSH_EM_ANDAMENTO[aba]){ PUSH_EM_ANDAMENTO[aba].depois=true; return; }
+  PUSH_EM_ANDAMENTO[aba]={depois:false};
+  try{
+    const hs=syncHashes()[aba]||{};
+    const dados=(DB[aba]||[]).map(limparRegistro).filter(r=>r && r.id!=null && hs[r.id]!==hashReg(r));
+    for(let i=0;i<dados.length;i+=20){
+      const lote=dados.slice(i,i+20);
+      try{
+        await api("pushMuitos",{itens:lote.map(r=>({aba,registro:r}))});
+        marcarSync(aba,lote);
+      }catch(e){
+        console.warn("push tabela falhou",aba,e.message);
+        lote.forEach(r=>filaAdd(aba,r));   // não perde: tenta de novo depois
+      }
+    }
+  } finally {
+    const again=PUSH_EM_ANDAMENTO[aba].depois;
+    delete PUSH_EM_ANDAMENTO[aba];
+    if(again) nuvemPushTabela(aba);
   }
 }
+// tenta reenviar pendências periodicamente e quando a internet volta
+setInterval(()=>{ if(apiConfigurada()) filaSincronizar().catch(()=>{}); }, 60000);
+window.addEventListener("online",()=>{ if(apiConfigurada()) filaSincronizar().catch(()=>{}); });
 
 /* ============================================================
    VEGAS FROTA — Sistema de Controle de Frota
@@ -1969,7 +2052,7 @@ async function finalizarRetirada(){
   const reg={id:rid,veiculoId:WZ.veiculoId,motoristaId:WZ.motoristaId,
     destinoId:WZ.destinoId,destinoNome:WZ.destinoNome,finalidade:WZ.finalidade,
     kmInicial:+WZ.kmInicial,nivelComb:WZ.nivelComb,niveisAgua:WZ.niveisAgua,niveisOleo:WZ.niveisOleo,
-    checklist:chk,fotos:fotoRefs,avaria:{...WZ.avaria,fotosRefs:avariaRefs},
+    checklist:chk,fotos:fotoRefs,avaria:{tem:WZ.avaria.tem,desc:WZ.avaria.desc,areas:[...(WZ.avaria.areas||[])],fotosRefs:avariaRefs},
     lat:WZ.lat,lng:WZ.lng,data:nowISO(),
     termoAceite:{nome:motorista(WZ.motoristaId)?.nome,data:nowISO(),usuario:SESSION.nome},
     devolvida:false};
@@ -1982,7 +2065,13 @@ async function finalizarRetirada(){
       data:nowISO(),local:WZ.destinoNome,descricao:WZ.avaria.desc+" | Áreas: "+WZ.avaria.areas.join(", "),status:"Aberta",fotos:avariaRefs});
   }
   log("Retirou viatura",v.interno);
-  saveSync(["retiradas","veiculos","ocorrencias","auditoria"]); wzClear();
+  save(); wzClear();
+  // grava a retirada na planilha ANTES de liberar a tela (e avisa se falhar)
+  if(apiConfigurada()){
+    try{ await api("push",{aba:"retiradas",registro:reg}); marcarSync("retiradas",[reg]); }
+    catch(e){ filaAdd("retiradas",reg); toast("⚠ Sem conexão: a retirada ficou salva no aparelho e será enviada automaticamente"); }
+  }
+  saveSync(["retiradas","veiculos","ocorrencias","auditoria"]);
   showComprovanteRet(reg);
 }
 
@@ -2261,7 +2350,15 @@ async function finalizarDevolucao(){
   if(apiConfigurada() && soLocal>0){ toast("⚠ "+soLocal+" de "+totalFotos+" fotos não subiram à nuvem — ficaram no aparelho"); }
   log("Devolveu viatura",v.interno+" (percorrido "+perc+" km)");
   const teveOcorrencia = !!(WZ.ocorrencia && WZ.ocorrencia.tem);   // guarda ANTES de limpar
-  saveSync(["devolucoes","retiradas","veiculos","ocorrencias","auditoria"]);wzClear();
+  save(); wzClear();
+  if(apiConfigurada()){
+    try{
+      await api("pushMuitos",{itens:[{aba:"devolucoes",registro:dev},{aba:"retiradas",registro:r},{aba:"veiculos",registro:v}]});
+      marcarSync("devolucoes",[dev]); marcarSync("retiradas",[r]); marcarSync("veiculos",[v]);
+    }catch(e){ filaAdd("devolucoes",dev); filaAdd("retiradas",r); filaAdd("veiculos",v);
+      toast("⚠ Sem conexão: a devolução ficou salva no aparelho e será enviada automaticamente"); }
+  }
+  saveSync(["devolucoes","retiradas","veiculos","ocorrencias","auditoria"]);
   const m=motorista(r.motoristaId);
   $("#view").innerHTML=`<div class="wizard-body"><div class="card receipt">
     <div class="big-em">🟢</div><h3>Devolução finalizada</h3>

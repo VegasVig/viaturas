@@ -78,6 +78,16 @@ function handle_(e){
     }
     var acao = body.acao || p.acao || "ping";
 
+    // Trava de escrita: impede que dois aparelhos gravem ao mesmo tempo
+    // (sem isso, gravações simultâneas podiam se perder ou duplicar).
+    var ESCRITA = ["push","pushMuitos","apagar","substituirTabela","setSeq"];
+    var lock = null;
+    if(ESCRITA.indexOf(acao)>=0){
+      lock = LockService.getScriptLock();
+      if(!lock.tryLock(25000)) throw "servidor ocupado, tente novamente";
+    }
+    try{
+
     if(acao==="ping"){ out = {ok:true, msg:"VEGAS FROTA backend online"}; }
 
     else if(acao==="pull"){                 // baixa o banco inteiro
@@ -89,8 +99,13 @@ function handle_(e){
       out = {ok:true};
     }
     else if(acao==="pushMuitos"){           // grava vários de uma vez
-      (body.itens||[]).forEach(function(it){ upsert_(it.aba, it.registro); });
-      out = {ok:true};
+      // grava todos os que puder; se algum falhar, avisa (o app reenvia)
+      var falhas = [];
+      (body.itens||[]).forEach(function(it){
+        try{ upsert_(it.aba, it.registro); }
+        catch(e){ falhas.push((it.registro&&it.registro.id)+": "+e); }
+      });
+      out = falhas.length ? {ok:false, erro:"falhou: "+falhas.join(" | ")} : {ok:true};
     }
     else if(acao==="apagar"){               // apaga um registro por id
       // body: {aba, id}
@@ -115,6 +130,7 @@ function handle_(e){
       out = {ok: (body.senha===SENHA_ADMIN)};
     }
     else { out = {ok:false, erro:"ação desconhecida: "+acao}; }
+    } finally { if(lock){ SpreadsheetApp.flush(); lock.releaseLock(); } }
 
   }catch(err){
     out = {ok:false, erro:String(err)};
@@ -148,17 +164,31 @@ function upsert_(aba, reg){
   if(ABAS.indexOf(aba)<0) throw "aba inválida: "+aba;
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(aba);
   var id = reg.id;
+  var json = JSON.stringify(limpaBase64_(reg));
+  // limite do Google Sheets: 50.000 caracteres por célula
+  if(json.length > 49000) throw "registro grande demais ("+json.length+" caracteres)";
   var last = sh.getLastRow();
   if(last>1){
     var ids = sh.getRange(2,1,last-1,1).getValues();
     for(var i=0;i<ids.length;i++){
       if(String(ids[i][0])===String(id)){
-        sh.getRange(i+2,2).setValue(JSON.stringify(reg));
+        sh.getRange(i+2,2).setValue(json);
         return;
       }
     }
   }
-  sh.appendRow([id, JSON.stringify(reg)]);
+  sh.appendRow([id, json]);
+}
+
+/* Tira fotos em base64 (data:...) que tenham vindo por engano dentro do
+   registro — elas estouravam o limite da célula e a gravação falhava. */
+function limpaBase64_(o){
+  if(typeof o==="string") return (o.indexOf("data:")===0 && o.length>2000) ? null : o;
+  if(Array.isArray(o)) return o.map(limpaBase64_).filter(function(x){ return x!==null; });
+  if(o && typeof o==="object"){
+    var r={}; for(var k in o){ r[k]=limpaBase64_(o[k]); } return r;
+  }
+  return o;
 }
 
 /* Apaga um registro pelo id (remove a linha da planilha). */
@@ -218,4 +248,96 @@ function salvarFoto_(nome, dataUrl){
   // Link que funciona diretamente em <img> (o formato antigo uc?export=view
   // foi descontinuado pelo Google e não carrega mais em tags de imagem).
   return "https://lh3.googleusercontent.com/d/" + arq.getId();
+}
+
+/*******************************************************************
+ *  CORREÇÃO AUTOMÁTICA DO STATUS DA FROTA (a cada 3 horas)
+ *  Faz exatamente o que o botão "Corrigir status da frota" faz no app,
+ *  mas sozinho, direto na planilha — mesmo com ninguém usando o app.
+ *
+ *  ATIVAR: no editor do Apps Script, escolha a função
+ *          "instalarCorrecaoAutomatica" e clique em Executar (1 vez só).
+ *  DESATIVAR: rode "removerCorrecaoAutomatica".
+ *******************************************************************/
+function instalarCorrecaoAutomatica(){
+  removerCorrecaoAutomatica();                 // evita gatilho duplicado
+  ScriptApp.newTrigger("corrigirStatusFrotaAuto").timeBased().everyHours(3).create();
+  var r = corrigirStatusFrotaAuto();           // já roda uma vez agora
+  return "Correção automática ativada (a cada 3 horas). Primeira execução: "+r;
+}
+function removerCorrecaoAutomatica(){
+  ScriptApp.getProjectTriggers().forEach(function(t){
+    if(t.getHandlerFunction()==="corrigirStatusFrotaAuto") ScriptApp.deleteTrigger(t);
+  });
+  return "Correção automática desativada.";
+}
+
+function lerTabela_(nome){
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nome);
+  var arr = [];
+  if(sh && sh.getLastRow()>1){
+    sh.getRange(2,1,sh.getLastRow()-1,2).getValues().forEach(function(r){
+      if(r[1]){ try{ arr.push(JSON.parse(r[1])); }catch(e){} }
+    });
+  }
+  return arr;
+}
+
+function corrigirStatusFrotaAuto(){
+  var lock = LockService.getScriptLock();
+  if(!lock.tryLock(60000)) return "servidor ocupado — tenta de novo no próximo ciclo";
+  try{
+    var veiculos   = lerTabela_("veiculos");
+    var retiradas  = lerTabela_("retiradas");
+    var devolucoes = lerTabela_("devolucoes");
+    var tempo = function(x){ return new Date(x).getTime() || 0; };
+    var retAlteradas = {}, veiAlterados = {}, detalhes = [];
+
+    veiculos.forEach(function(v){
+      var abertas = retiradas.filter(function(r){ return r.veiculoId===v.id && !r.devolvida; });
+      var devsV = devolucoes.filter(function(d){ return d.veiculoId===v.id; })
+                            .sort(function(a,b){ return tempo(b.data)-tempo(a.data); });
+      var ultimaDev = devsV[0];
+
+      // retirada aberta com devolução posterior (ou igual) => órfã, fecha
+      abertas.forEach(function(r){
+        if(ultimaDev && tempo(ultimaDev.data) >= tempo(r.data)){
+          r.devolvida = true;
+          if(!r.devolucaoId) r.devolucaoId = ultimaDev.id;
+          retAlteradas[r.id] = r;
+          detalhes.push((v.interno||v.id)+": retirada órfã fechada");
+        }
+      });
+
+      var aindaAberta = retiradas.some(function(r){ return r.veiculoId===v.id && !r.devolvida; });
+      var antes = v.status;
+      if(aindaAberta){
+        if(v.status!=="Manutenção" && v.status!=="Indisponível") v.status = "Em uso";
+      } else if(v.status==="Em uso"){
+        v.status = "Disponível";
+      }
+      if(v.status!==antes){
+        veiAlterados[v.id] = v;
+        detalhes.push((v.interno||v.id)+": "+antes+" → "+v.status);
+      }
+    });
+
+    Object.keys(retAlteradas).forEach(function(id){ upsert_("retiradas", retAlteradas[id]); });
+    Object.keys(veiAlterados).forEach(function(id){ upsert_("veiculos", veiAlterados[id]); });
+
+    if(detalhes.length){
+      upsert_("auditoria", {
+        id: "auto" + new Date().getTime(),
+        usuario: "Sistema (automático)", nivel: "Sistema",
+        data: new Date().toISOString(),
+        acao: "Correção automática da frota",
+        registro: detalhes.length+" ajuste(s): "+detalhes.join("; ")
+      });
+    }
+    SpreadsheetApp.flush();
+    Logger.log(detalhes.length ? detalhes.join("\n") : "Nada a corrigir");
+    return detalhes.length + " ajuste(s)";
+  } finally {
+    lock.releaseLock();
+  }
 }
