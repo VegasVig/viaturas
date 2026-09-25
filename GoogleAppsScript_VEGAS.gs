@@ -19,7 +19,17 @@ var PASTA_FOTOS = "VEGAS_FROTA_FOTOS"; // pasta criada no seu Drive p/ as fotos
 
 // Abas (tabelas) do banco
 var ABAS = ["usuarios","motoristas","veiculos","destinos","retiradas",
-            "devolucoes","abastecimentos","manutencoes","ocorrencias","auditoria","meta"];
+            "devolucoes","abastecimentos","manutencoes","ocorrencias","calibragens","auditoria","meta"];
+
+/* Pega a aba; se não existir (ex.: "calibragens", criada nesta versão),
+   cria na hora com o cabeçalho. Antes, uma aba faltando fazia a gravação
+   falhar e o registro se perdia. */
+function aba_(nome){
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(nome);
+  if(!sh){ sh = ss.insertSheet(nome); sh.appendRow(["id","json"]); }
+  return sh;
+}
 
 // ====== INSTALAÇÃO (rodar 1x) ======
 function primeiraInstalacao(){
@@ -80,7 +90,7 @@ function handle_(e){
 
     // Trava de escrita: impede que dois aparelhos gravem ao mesmo tempo
     // (sem isso, gravações simultâneas podiam se perder ou duplicar).
-    var ESCRITA = ["push","pushMuitos","apagar","substituirTabela","setSeq"];
+    var ESCRITA = ["push","pushMuitos","apagar","substituirTabela","setSeq","retirar","devolver"];
     var lock = null;
     if(ESCRITA.indexOf(acao)>=0){
       lock = LockService.getScriptLock();
@@ -126,6 +136,12 @@ function handle_(e){
       var url = salvarFoto_(body.nome, body.dataUrl);
       out = {ok:true, url:url};
     }
+    else if(acao==="retirar"){              // retirada validada no servidor
+      out = retirar_(body);
+    }
+    else if(acao==="devolver"){             // devolução validada no servidor
+      out = devolver_(body);
+    }
     else if(acao==="login"){                // valida senha admin
       out = {ok: (body.senha===SENHA_ADMIN)};
     }
@@ -146,7 +162,7 @@ function pullDB_(){
   var db = {};
   ABAS.forEach(function(nome){
     if(nome==="meta") return;
-    var sh = ss.getSheetByName(nome);
+    var sh = aba_(nome);
     var arr = [];
     if(sh && sh.getLastRow()>1){
       var vals = sh.getRange(2,1,sh.getLastRow()-1,2).getValues();
@@ -162,22 +178,46 @@ function pullDB_(){
 
 function upsert_(aba, reg){
   if(ABAS.indexOf(aba)<0) throw "aba inválida: "+aba;
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(aba);
+  if(!reg || reg.id==null || reg.id==="") throw "registro sem id";
+  var sh = aba_(aba);
   var id = reg.id;
-  var json = JSON.stringify(limpaBase64_(reg));
-  // limite do Google Sheets: 50.000 caracteres por célula
-  if(json.length > 49000) throw "registro grande demais ("+json.length+" caracteres)";
   var last = sh.getLastRow();
+  var linha = -1, antigo = null;
   if(last>1){
-    var ids = sh.getRange(2,1,last-1,1).getValues();
-    for(var i=0;i<ids.length;i++){
-      if(String(ids[i][0])===String(id)){
-        sh.getRange(i+2,2).setValue(json);
-        return;
+    var vals = sh.getRange(2,1,last-1,2).getValues();
+    for(var i=0;i<vals.length;i++){
+      if(String(vals[i][0])===String(id)){
+        linha = i+2;
+        try{ antigo = JSON.parse(vals[i][1]); }catch(e){ antigo = null; }
+        break;
       }
     }
   }
-  sh.appendRow([id, json]);
+  if(antigo) reg = protegerRegistro_(aba, antigo, reg);
+  var json = JSON.stringify(limpaBase64_(reg));
+  // limite do Google Sheets: 50.000 caracteres por célula
+  if(json.length > 49000) throw "registro grande demais ("+json.length+" caracteres)";
+  if(linha>0) sh.getRange(linha,2).setValue(json);
+  else sh.appendRow([id, json]);
+}
+
+/* Proteções contra aparelhos com dados velhos regravando por cima:
+   - retirada já DEVOLVIDA nunca volta a ficar aberta;
+   - a quilometragem do veículo nunca diminui (exceto correção explícita
+     feita pelo gestor, marcada com kmCorrigidoEm). */
+function protegerRegistro_(aba, antigo, novo){
+  var r = JSON.parse(JSON.stringify(novo));
+  if(aba==="retiradas" && antigo.devolvida && !r.devolvida){
+    r.devolvida = true;
+    r.devolucaoId = r.devolucaoId || antigo.devolucaoId;
+    r.devolvidaEm = r.devolvidaEm || antigo.devolvidaEm;
+  }
+  if(aba==="veiculos"){
+    var kmA = Number(antigo.km)||0, kmN = Number(r.km)||0;
+    var correcaoNova = r.kmCorrigidoEm && r.kmCorrigidoEm !== antigo.kmCorrigidoEm;
+    if(kmN < kmA && !correcaoNova){ r.km = kmA; r.kmEm = antigo.kmEm || r.kmEm; }
+  }
+  return r;
 }
 
 /* Tira fotos em base64 (data:...) que tenham vindo por engano dentro do
@@ -194,7 +234,7 @@ function limpaBase64_(o){
 /* Apaga um registro pelo id (remove a linha da planilha). */
 function apagar_(aba, id){
   if(ABAS.indexOf(aba)<0) throw "aba inválida: "+aba;
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(aba);
+  var sh = aba_(aba);
   var last = sh.getLastRow();
   if(last<=1) return;
   var ids = sh.getRange(2,1,last-1,1).getValues();
@@ -208,7 +248,7 @@ function apagar_(aba, id){
    de uma vez, para todos os aparelhos (o banco central fica correto). */
 function substituirTabela_(aba, registros){
   if(ABAS.indexOf(aba)<0) throw "aba inválida: "+aba;
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(aba);
+  var sh = aba_(aba);
   var last = sh.getLastRow();
   if(last>1){ sh.deleteRows(2, last-1); }     // apaga tudo menos o cabeçalho
   (registros||[]).forEach(function(reg){
@@ -232,6 +272,107 @@ function setMeta_(chave,obj){
     if(vals[i][0]===chave){ sh.getRange(i+2,2).setValue(JSON.stringify(obj)); return; }
   }
   sh.appendRow([chave, JSON.stringify(obj)]);
+}
+
+// ====== RETIRADA / DEVOLUÇÃO VALIDADAS NO SERVIDOR ======
+/* Estas duas ações rodam dentro da trava (LockService). Assim, mesmo com
+   vários celulares ao mesmo tempo, é IMPOSSÍVEL existir duas retiradas
+   abertas para o mesmo veículo, ou devolver um veículo que não está retirado. */
+
+/* Quilometragem atual: maior leitura registrada (veículo, retiradas,
+   devoluções, abastecimentos, manutenções, calibragens). Se o gestor fez uma
+   correção manual (kmCorrigidoEm), só contam as leituras posteriores a ela. */
+function kmAtualServidor_(vid, veiculo){
+  var corte = veiculo && veiculo.kmCorrigidoEm ? new Date(veiculo.kmCorrigidoEm).getTime() : 0;
+  var km = veiculo ? (Number(veiculo.km)||0) : 0;
+  var soma = function(arr, campo){
+    arr.forEach(function(x){
+      if(x.veiculoId!==vid) return;
+      var val = Number(x[campo])||0; if(!val) return;
+      if(corte && (new Date(x.data).getTime()||0) <= corte) return;
+      if(val>km) km = val;
+    });
+  };
+  soma(lerTabela_("retiradas"),"kmInicial");
+  soma(lerTabela_("devolucoes"),"kmFinal");
+  soma(lerTabela_("abastecimentos"),"km");
+  soma(lerTabela_("manutencoes"),"km");
+  soma(lerTabela_("calibragens"),"km");
+  return km;
+}
+function acharPorId_(aba, id){
+  var arr = lerTabela_(aba);
+  for(var i=0;i<arr.length;i++){ if(String(arr[i].id)===String(id)) return arr[i]; }
+  return null;
+}
+function nomeMotorista_(id){ var m = acharPorId_("motoristas", id); return m ? m.nome : ""; }
+
+function retirar_(body){
+  var reg = body.retirada;
+  if(!reg || !reg.id || !reg.veiculoId) return {ok:false, erro:"Retirada inválida"};
+  var veiculo = acharPorId_("veiculos", reg.veiculoId);
+  if(!veiculo) return {ok:false, erro:"VEICULO_NAO_ENCONTRADO"};
+  var rets = lerTabela_("retiradas");
+  for(var i=0;i<rets.length;i++){
+    if(String(rets[i].id)===String(reg.id)) return {ok:true, jaRegistrada:true, veiculo:veiculo};  // reenvio
+  }
+  var aberta = null;
+  rets.forEach(function(r){ if(r.veiculoId===reg.veiculoId && !r.devolvida) aberta = r; });
+  if(aberta){
+    return {ok:false, erro:"VEICULO_EM_USO", conflito:{retiradaId:aberta.id, motoristaId:aberta.motoristaId,
+      motoristaNome: aberta.motoristaNome || nomeMotorista_(aberta.motoristaId), data:aberta.data, kmInicial:aberta.kmInicial}};
+  }
+  var kmAt = kmAtualServidor_(reg.veiculoId, veiculo);
+  if((Number(reg.kmInicial)||0) < kmAt) return {ok:false, erro:"KM_INVALIDO", kmAtual:kmAt};
+
+  reg.devolvida = false;
+  upsert_("retiradas", reg);
+  veiculo.status = "Em uso";
+  veiculo.km = Number(reg.kmInicial)||kmAt; veiculo.kmEm = reg.data;
+  veiculo.motoristaAtualId = reg.motoristaId;
+  veiculo.retiradaAtualId = reg.id;
+  upsert_("veiculos", veiculo);
+  gravarExtras_(body.extras);
+  return {ok:true, veiculo:acharPorId_("veiculos", reg.veiculoId)};
+}
+
+function devolver_(body){
+  var dev = body.devolucao;
+  if(!dev || !dev.id || !dev.retiradaId) return {ok:false, erro:"Devolução inválida"};
+  var r = acharPorId_("retiradas", dev.retiradaId);
+  if(!r && body.retirada && body.retirada.id===dev.retiradaId){
+    // retirada feita sem internet que ainda não tinha chegado à planilha
+    r = body.retirada; r.devolvida = false; upsert_("retiradas", r);
+  }
+  if(!r) return {ok:false, erro:"RETIRADA_NAO_ENCONTRADA"};
+  if(r.devolvida){
+    if(r.devolucaoId===dev.id) return {ok:true, jaRegistrada:true, veiculo:acharPorId_("veiculos", r.veiculoId)};
+    return {ok:false, erro:"JA_DEVOLVIDA", devolucaoId:r.devolucaoId};
+  }
+  if((Number(dev.kmFinal)||0) < (Number(r.kmInicial)||0)) return {ok:false, erro:"KM_INVALIDO", kmAtual:Number(r.kmInicial)||0};
+
+  upsert_("devolucoes", dev);
+  r.devolvida = true; r.devolucaoId = dev.id; r.devolvidaEm = dev.data;
+  upsert_("retiradas", r);
+
+  var veiculo = acharPorId_("veiculos", r.veiculoId);
+  if(veiculo){
+    var aindaAberta = lerTabela_("retiradas").some(function(x){ return x.veiculoId===r.veiculoId && !x.devolvida; });
+    if(!aindaAberta){
+      if(veiculo.status==="Em uso" || !veiculo.status) veiculo.status = "Disponível";
+      veiculo.motoristaAtualId = ""; veiculo.retiradaAtualId = "";
+    }
+    if((Number(dev.kmFinal)||0) > (Number(veiculo.km)||0)){ veiculo.km = Number(dev.kmFinal); veiculo.kmEm = dev.data; }
+    veiculo.ultimoMotoristaId = r.motoristaId;
+    upsert_("veiculos", veiculo);
+  }
+  gravarExtras_(body.extras);
+  return {ok:true, veiculo: veiculo ? acharPorId_("veiculos", veiculo.id) : null};
+}
+function gravarExtras_(extras){
+  (extras||[]).forEach(function(it){
+    if(it && it.aba && it.registro && it.aba!=="retiradas" && it.aba!=="devolucoes") upsert_(it.aba, it.registro);
+  });
 }
 
 // ====== FOTOS (Drive) ======
@@ -273,7 +414,7 @@ function removerCorrecaoAutomatica(){
 }
 
 function lerTabela_(nome){
-  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(nome);
+  var sh = aba_(nome);
   var arr = [];
   if(sh && sh.getLastRow()>1){
     sh.getRange(2,1,sh.getLastRow()-1,2).getValues().forEach(function(r){
@@ -290,22 +431,24 @@ function corrigirStatusFrotaAuto(){
     var veiculos   = lerTabela_("veiculos");
     var retiradas  = lerTabela_("retiradas");
     var devolucoes = lerTabela_("devolucoes");
-    var tempo = function(x){ return new Date(x).getTime() || 0; };
     var retAlteradas = {}, veiAlterados = {}, detalhes = [];
 
     veiculos.forEach(function(v){
       var abertas = retiradas.filter(function(r){ return r.veiculoId===v.id && !r.devolvida; });
-      var devsV = devolucoes.filter(function(d){ return d.veiculoId===v.id; })
-                            .sort(function(a,b){ return tempo(b.data)-tempo(a.data); });
-      var ultimaDev = devsV[0];
 
-      // retirada aberta com devolução posterior (ou igual) => órfã, fecha
+      /* Só fecha uma retirada aberta se EXISTIR uma devolução que aponta
+         para ela (retiradaId). A regra antiga fechava qualquer retirada mais
+         antiga que a última devolução do veículo — com relógios diferentes
+         entre celulares, isso apagava o vínculo do motorista que estava
+         com o veículo de verdade. */
       abertas.forEach(function(r){
-        if(ultimaDev && tempo(ultimaDev.data) >= tempo(r.data)){
+        var dev = devolucoes.filter(function(d){ return d.retiradaId===r.id; })[0];
+        if(dev){
           r.devolvida = true;
-          if(!r.devolucaoId) r.devolucaoId = ultimaDev.id;
+          r.devolucaoId = r.devolucaoId || dev.id;
+          r.devolvidaEm = r.devolvidaEm || dev.data;
           retAlteradas[r.id] = r;
-          detalhes.push((v.interno||v.id)+": retirada órfã fechada");
+          detalhes.push((v.interno||v.id)+": retirada com devolução registrada foi fechada");
         }
       });
 
