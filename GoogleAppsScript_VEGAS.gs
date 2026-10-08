@@ -415,6 +415,15 @@ function upsert_(aba, reg, opts){
     reg = autorizar_(opts.sess, aba, reg, antigo);
     if(reg===null) return antigo;              // nada a alterar (ex.: histórico já gravado)
   }
+  // NOMES DUPLICADOS: um motorista NOVO com nome igual a um já cadastrado é
+  // ignorado (era assim que aparelhos com a lista antiga recriavam cada técnico).
+  if(aba==="motoristas" && !antigo){
+    var chave = chaveNome_(reg.nome);
+    if(chave){
+      var lista = lerTabela_("motoristas");
+      for(var k=0;k<lista.length;k++){ if(chaveNome_(lista[k].nome)===chave) return lista[k]; }
+    }
+  }
   if(antigo){
     if(IMUTAVEIS.indexOf(aba)>=0) return antigo;   // histórico nunca é sobrescrito
     reg = protegerRegistro_(aba, antigo, reg);
@@ -594,6 +603,7 @@ function acharPorId_(aba, id){
   var linha = idIndex_(aba)[String(id)];
   return linha ? lerLinha_(aba, linha) : null;
 }
+function chaveNome_(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ").trim().toLowerCase(); }
 function nomeMotorista_(id){ var m = acharPorId_("motoristas", id); return m ? m.nome : ""; }
 function retiradasAbertasIdx_(vid){
   vid = String(vid);

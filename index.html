@@ -600,6 +600,8 @@ function traduzErroServidor(e){
   if(/KM_INVALIDO/.test(e)) return "quilometragem menor que a última registrada";
   if(/JA_BAIXADA/.test(e)) return "este veículo já teve baixa administrativa registrada";
   if(/JA_DEVOLVIDA/.test(e)) return "a entrega deste veículo já foi registrada";
+  if(/aba inv[aá]lida/.test(e)) return "o servidor (Apps Script) está DESATUALIZADO e não conhece a tabela “"+e.split(":").pop().trim()+"”. Publique a versão 6 do backend (Implantar → Gerenciar implantações → Nova versão)";
+  if(/a[cç][aã]o desconhecida/i.test(e)) return "o servidor (Apps Script) está DESATUALIZADO para esta função. Publique a versão 6 do backend";
   return e;
 }
 /* true quando o erro foi de rede (sem internet / tempo esgotado), e não uma
@@ -625,6 +627,14 @@ let ULTIMO_PULL=0;
    "sumia" e veículos retirados voltavam a aparecer como disponíveis.
    Agora nenhum registro local pendente é descartado, em nenhuma tabela. */
 let PULL_PROMISE=null;
+/* CORREÇÃO (nomes duplicados): um registro da lista inicial que nunca foi
+   alterado NÃO é edição local — não pode ser reenviado para a planilha.
+   Era isso que recriava cada técnico com um segundo id. Se a planilha
+   estiver vazia, a lista inicial continua sendo enviada (nuvemSemear). */
+function seedIntocado(aba,r){
+  const s=(TABELAS_SEED()[aba]||[]).find(x=>String(x.id)===String(r.id));
+  return !!s && hashReg(s)===hashReg(r);
+}
 /* v6: sincronização INCREMENTAL. O aparelho guarda o horário do servidor da
    última sincronização e pede só o que mudou desde então (antes baixava o
    banco inteiro a cada 45 s em cada celular — vários MB por vez). */
@@ -639,7 +649,7 @@ function nuvemPull(opts){
     const hashes=syncHashes();
     const pend={};
     TABELAS.forEach(aba=>{
-      pend[aba]=(DB[aba]||[]).filter(r=>r && r.id!=null && hashes[aba]?.[r.id]!==hashReg(r));
+      pend[aba]=(DB[aba]||[]).filter(r=>r && r.id!=null && hashes[aba]?.[r.id]!==hashReg(r) && !seedIntocado(aba,r));
     });
     const cursor=+localStorage.getItem(PULL_CURSOR_KEY)||0;
     const desde=(opts&&opts.completo)||!cursor ? 0 : Math.max(1,cursor-120000);   // 2 min de folga
@@ -707,6 +717,11 @@ function nuvemPull(opts){
     return DB;
   })();
   PULL_PROMISE.finally(()=>{ PULL_PROMISE=null; }).catch(()=>{});
+  // só depois de sincronizar com sucesso (e fora do pull, para não esperar a si mesmo):
+  // se a planilha tiver nomes repetidos, unifica automaticamente
+  PULL_PROMISE.then(()=>{
+    if(podeCorrigirCadastro() && temMotoristasDuplicados()) setTimeout(()=>deduplicarMotoristas(true).catch(e=>console.warn("dedup:",e)),300);
+  }).catch(()=>{});
   return PULL_PROMISE;
 }
 /* Atualiza da nuvem antes de uma ação crítica. Se não houver internet,
@@ -839,7 +854,14 @@ async function nuvemPushTabela(aba){
       }catch(e){
         console.warn("push tabela falhou",aba,e.message);
         lote.forEach(r=>filaAdd(aba,r));   // não perde: tenta de novo depois
-        if(!erroDeRede(e)) toast("⚠ Servidor recusou um envio: "+(e.amigavel||e.message),"erro");
+        if(!erroDeRede(e)){
+          // avisa com clareza, sem repetir o mesmo aviso a cada tentativa automática
+          const msg=e.amigavel||e.message, ag=Date.now();
+          if(msg!==window._ultAvisoSrvMsg || ag-(window._ultAvisoSrvEm||0)>600000){
+            window._ultAvisoSrvMsg=msg; window._ultAvisoSrvEm=ag;
+            toast("⚠ Não foi possível enviar ao servidor: "+msg+". Nada foi perdido — os dados ficaram guardados neste aparelho.","erro");
+          }
+        }
       }
     }
   } finally {
@@ -1039,7 +1061,7 @@ function toast(msg,tipo){ let t=$(".toast"); if(!t){t=document.createElement("di
   msg=String(msg==null?"":msg);
   if(!tipo) tipo = /^⚠/.test(msg)?"aviso" : (/não consegui|falhou|erro|recusou/i.test(msg)?"erro" : (/✓|salv|registrad|criad|atualizad|gerad|exportad|conectad/i.test(msg)?"ok":""));
   t.className="toast"+(tipo?" "+tipo:""); t.textContent=msg; void t.offsetWidth; t.classList.add("show");
-  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove("show"), tipo==="erro"?5200:(msg.length>60?3600:2400));}
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove("show"), tipo==="erro"?Math.max(5200,msg.length*55):(msg.length>60?3600:2400));}
 
 /* Executa uma ação de salvar mostrando "Salvando..." e BLOQUEANDO o botão
    enquanto processa — evita o clique duplo que gravava o registro 2x. */
@@ -1152,7 +1174,7 @@ function preencherMotoristas(){
   const sel=$("#mot-select"); if(!sel) return;
   const atual=sel.value;
   sel.innerHTML='<option value="">Selecione seu nome...</option>'+
-    DB.motoristas.filter(m=>m.status==="Ativo").slice().sort((a,b)=>(a.nome||"").localeCompare(b.nome||"","pt-BR"))
+    semNomesRepetidos(DB.motoristas.filter(m=>m.status==="Ativo")).sort((a,b)=>(a.nome||"").localeCompare(b.nome||"","pt-BR"))
       .map(m=>`<option value="${m.id}">${esc(m.nome)}</option>`).join("");
   if(atual) sel.value=atual;
 }
@@ -1175,6 +1197,7 @@ function enterApp(){
   if(apiConfigurada() && SESSION.tipo==="motorista" && !SESSION.token) renovarSessao().catch(()=>{});
   // ao abrir (inclusive depois de atualizar a página) busca o estado atual da frota
   if(apiConfigurada()) setTimeout(()=>{ atualizarTela(true); enviarFotosPendentes(); },50);
+  else if(podeCorrigirCadastro() && temMotoristasDuplicados()) setTimeout(()=>deduplicarMotoristas(true),300);
 }
 
 /* ---------- NAVEGAÇÃO ---------- */
@@ -1935,7 +1958,10 @@ ROUTES.motoristas=(el)=>{
       <input id="m-search" placeholder="Buscar nome, matrícula...">
       <button class="btn sm" style="width:auto;white-space:nowrap" onclick="formMotorista()">＋ Novo</button>
     </div>
-    <button class="btn ghost" style="width:auto;font-size:12px;padding:6px 12px;margin-bottom:12px" onclick="redefinirMotoristas()">🔧 Corrigir lista (separar duplas)</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+      <button class="btn ghost" style="width:auto;font-size:12px;padding:6px 12px" onclick="redefinirMotoristas()">🔧 Corrigir lista (separar duplas)</button>
+      <button class="btn ghost" style="width:auto;font-size:12px;padding:6px 12px" onclick="deduplicarMotoristas(false)">🧹 Remover nomes duplicados</button>
+    </div>
     <div id="m-list" class="list"></div></div>`;
   let q="";
   const render=()=>{
@@ -2019,8 +2045,11 @@ async function redefinirMotoristas(){
   });
 
   DB.motoristas = manter;
+  // se o mesmo nome estava cadastrado mais de uma vez, fica só um (com todo o histórico)
+  const dedup = aplicarDeduplicacaoMot(planoDuplicadosMot());
   log("Redefiniu lista de motoristas", MOTORISTAS_OFICIAIS.length+" oficiais");
   save();  // salva local primeiro
+  if(dedup.abas.length) saveSync(dedup.abas);
   // Corrige o BANCO CENTRAL de uma vez: apaga as duplas antigas da planilha e
   // regrava só a lista correta. Assim TODOS os aparelhos passam a ver certo,
   // sem precisar corrigir em cada celular.
@@ -2028,6 +2057,7 @@ async function redefinirMotoristas(){
     try{
       toast("Corrigindo na nuvem central...");
       await api("substituirTabela", {aba:"motoristas", registros: DB.motoristas});
+      marcarSync("motoristas", DB.motoristas);
       await api("setSeq",{v:DB._seq});
       toast("Lista corrigida na nuvem ✓ (vale para todos os aparelhos)");
     }catch(e){
@@ -2040,10 +2070,115 @@ async function redefinirMotoristas(){
   go("motoristas");
 }
 
+/* ============ NOMES DUPLICADOS ============
+   CAUSA: os aparelhos que ainda tinham a lista inicial (ids m1, m2...) no
+   armazenamento local reenviavam esses registros para a planilha, que já
+   tinha os mesmos nomes com outros ids (criados pela "Corrigir lista").
+   Resultado: cada técnico aparecia duas vezes.
+   Aqui: unifica os registros com o MESMO nome (sem diferenciar maiúsculas,
+   acentos e espaços), mantém um só, completa os dados que faltarem e
+   transfere TODO o histórico (retiradas, entregas, abastecimentos...) para
+   o registro que ficou — nada do passado se perde. */
+function chaveNome(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ").trim().toLowerCase(); }
+var CAMPOS_REF_MOT = ["motoristaId","motoristaAtualId","ultimoMotoristaId","registradoPorId","responsavelId"];
+var TABELAS_REF_MOT = ["retiradas","devolucoes","abastecimentos","manutencoes","ocorrencias","calibragens","veiculos"]; // baixas e auditoria são imutáveis (guardam o nome)
+var CAMPOS_COMPLETAR_MOT = ["foto","cpf","matricula","telefone","funcao","cnh","cat","validadeCnh","obs"];
+
+/* Agrupa os duplicados e escolhe quem fica: ativo > com mais histórico > mais dados preenchidos. */
+function planoDuplicadosMot(){
+  const usos = {};
+  TABELAS_REF_MOT.forEach(t=>(DB[t]||[]).forEach(r=>CAMPOS_REF_MOT.forEach(c=>{ if(r&&r[c]) usos[r[c]]=(usos[r[c]]||0)+1; })));
+  const grupos = new Map();
+  DB.motoristas.forEach(m=>{ const k=chaveNome(m.nome); if(!k) return; if(!grupos.has(k)) grupos.set(k,[]); grupos.get(k).push(m); });
+  const pontos = m => (m.status==="Ativo"?1e9:0) + (usos[m.id]||0)*1000 + CAMPOS_COMPLETAR_MOT.filter(c=>m[c]).length;
+  const plano = [];
+  grupos.forEach(lista=>{
+    if(lista.length<2) return;
+    lista.sort((a,b)=>pontos(b)-pontos(a) || String(a.id).localeCompare(String(b.id)));
+    plano.push({manter:lista[0], remover:lista.slice(1)});
+  });
+  return plano;
+}
+function temMotoristasDuplicados(){ return planoDuplicadosMot().length>0; }
+
+/* Aplica no banco do aparelho. Retorna {removidos, abas} (abas de histórico alteradas). */
+function aplicarDeduplicacaoMot(plano){
+  const alias = {}; let removidos = 0;
+  plano.forEach(({manter,remover})=>{
+    remover.forEach(d=>{
+      alias[d.id] = manter.id; removidos++;
+      CAMPOS_COMPLETAR_MOT.forEach(c=>{ if(!manter[c] && d[c]) manter[c]=d[c]; });   // completa o que faltar
+      if(d.status==="Ativo") manter.status="Ativo";
+    });
+    // nome final: a grafia da lista oficial; senão, a que tem acentos (ex.: "André", não "Andre")
+    const grafias=[manter,...remover].map(m=>String(m.nome||"").replace(/\s+/g," ").trim());
+    const oficial=(typeof MOTORISTAS_OFICIAIS!=="undefined"?MOTORISTAS_OFICIAIS:[]).find(n=>chaveNome(n)===chaveNome(grafias[0]));
+    const acentos=n=>n.normalize("NFD").length-n.length;
+    manter.nome = oficial || grafias.slice().sort((x,y)=>acentos(y)-acentos(x))[0];
+  });
+  const abas = new Set();
+  TABELAS_REF_MOT.forEach(t=>(DB[t]||[]).forEach(r=>{
+    if(!r) return;
+    CAMPOS_REF_MOT.forEach(c=>{ if(r[c] && alias[r[c]]){ r[c]=alias[r[c]]; abas.add(t); } });
+  }));
+  DB.motoristas = DB.motoristas.filter(m=>!alias[m.id]);
+  return {removidos, abas:[...abas]};
+}
+
+function podeCorrigirCadastro(){ return !!SESSION && SESSION.tipo==="admin" && SESSION.nivel!=="Consulta"; }
+
+var DEDUP_MOT_RODANDO=false;
+/* auto=true: chamada automática depois de sincronizar (sem perguntas). */
+async function deduplicarMotoristas(auto){
+  if(DEDUP_MOT_RODANDO) return 0;
+  if(auto && !podeCorrigirCadastro()) return 0;
+  if(!auto && !podeCorrigirCadastro()){ toast("⚠ Somente Administrador ou Gestor pode corrigir a lista"); return 0; }
+  DEDUP_MOT_RODANDO=true;
+  try{
+    if(!auto && apiConfigurada()) await atualizarAntes("Atualizando a lista antes de corrigir...");
+    const plano = planoDuplicadosMot();
+    if(!plano.length){ if(!auto) toast("✓ Nenhum nome duplicado encontrado"); return 0; }
+    if(!auto){
+      const nomes = plano.map(p=>p.manter.nome).slice(0,12).join(", ")+(plano.length>12?"...":"");
+      if(!confirm(plano.length+" nome(s) aparecem duplicados:\n"+nomes+"\n\nVou deixar apenas UM registro de cada e transferir todo o histórico para ele. Continuar?")) return 0;
+    }
+    const {removidos, abas} = aplicarDeduplicacaoMot(plano);
+    log("Removeu motoristas duplicados", removidos+" registro(s) unificado(s)");
+    save();
+    let nuvemOk = true;
+    if(apiConfigurada()){
+      try{
+        await api("substituirTabela", {aba:"motoristas", registros: DB.motoristas});
+        marcarSync("motoristas", DB.motoristas);
+      }catch(e){ nuvemOk=false; console.warn("dedup na nuvem falhou:",e); }
+    }
+    saveSync([...abas,"auditoria"]);   // histórico transferido segue para a planilha
+    toast(nuvemOk ? "✓ "+removidos+" nome(s) duplicado(s) removido(s)"+(apiConfigurada()?" — corrigido para todos os aparelhos":"")
+                  : "⚠ Duplicados removidos neste aparelho, mas a nuvem não respondeu. Será tentado de novo automaticamente.");
+    if(typeof CURRENT!=="undefined" && ["motoristas","motorista-det","dashboard"].includes(CURRENT)) go(CURRENT==="motorista-det"?"motoristas":CURRENT);
+    return removidos;
+  } finally { DEDUP_MOT_RODANDO=false; }
+}
+
+/* Para listas exibidas a quem não pode corrigir (ex.: tela de login):
+   mostra cada nome uma única vez. */
+function semNomesRepetidos(lista){
+  const vistos = new Map();
+  lista.forEach(m=>{
+    const k=chaveNome(m.nome); if(!k) return;
+    const atual=vistos.get(k);
+    if(!atual || (atual.status!=="Ativo" && m.status==="Ativo")) vistos.set(k,m);
+  });
+  return [...vistos.values()];
+}
+
 function saveMotorista(id){
   const g=k=>$("#mf-"+k).value;
   const data={nome:g("nome"),cpf:g("cpf"),matricula:g("matricula"),telefone:g("telefone"),funcao:g("funcao"),cnh:g("cnh"),cat:g("cat"),validadeCnh:g("validadeCnh"),status:g("status"),obs:g("obs")};
+  data.nome=data.nome.replace(/\s+/g," ").trim();
   if(!data.nome){toast("Informe o nome");return;}
+  const repetido=DB.motoristas.find(m=>m.id!==id && chaveNome(m.nome)===chaveNome(data.nome));
+  if(repetido){toast("⚠ Já existe um motorista chamado \""+repetido.nome+"\""+(repetido.status!=="Ativo"?" (inativo — edite o cadastro dele)":""),"erro");return;}
   if(id){const m=motorista(id);Object.assign(m,data);log("Editou motorista",m.nome);}
   else{DB.motoristas.push({id:uid("m"),foto:null,...data});log("Cadastrou motorista",data.nome);}
   saveSync(["motoristas","auditoria"]);closeModal();toast("Motorista salvo");go("motoristas");
@@ -3838,8 +3973,8 @@ preencherMotoristas=function(){
   const sel=$("#mot-select"); if(!sel) return;
   if(!LISTA_LOGIN_MOT) return _preencherMotoristasBase();
   const atual=sel.value;
-  sel.innerHTML='<option value="">Selecione seu nome...</option>'+LISTA_LOGIN_MOT.filter(m=>(m.status||"Ativo")==="Ativo")
-    .slice().sort((a,b)=>(a.nome||"").localeCompare(b.nome||"","pt-BR")).map(m=>`<option value="${esc(m.id)}">${esc(m.nome)}</option>`).join("");
+  sel.innerHTML='<option value="">Selecione seu nome...</option>'+semNomesRepetidos(LISTA_LOGIN_MOT.filter(m=>(m.status||"Ativo")==="Ativo"))
+    .sort((a,b)=>(a.nome||"").localeCompare(b.nome||"","pt-BR")).map(m=>`<option value="${esc(m.id)}">${esc(m.nome)}</option>`).join("");
   if(atual) sel.value=atual;
 };
 
@@ -3907,6 +4042,7 @@ function abrirPainelSync(){
   const pend=filaTamanho(), fotos=fotosPendentes().length;
   openModal("Sincronização",`
     <div class="rec-lines">
+      <div class="rl"><span>Versão do servidor</span><b>${!apiConfigurada()?"—":(BACKEND_V>=6?"v"+BACKEND_V+" ✓":"<span style='color:var(--orange)'>antiga — publique a versão 6 do Apps Script</span>")}</b></div>
       <div class="rl"><span>Conexão</span><b>${!apiConfigurada()?"Modo local (sem nuvem)":(navigator.onLine?"Online":"Sem internet")}</b></div>
       <div class="rl"><span>Última atualização</span><b>${ULTIMO_PULL?dtBR(new Date(ULTIMO_PULL).toISOString()):"—"}</b></div>
       <div class="rl"><span>Registros aguardando envio</span><b>${pend}</b></div>
