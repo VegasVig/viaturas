@@ -36,6 +36,15 @@
  *     aparelhos desatualizados.
  *   - Se um item extra (ocorrência/auditoria) falhar, a entrega NÃO é
  *     recusada — ela já foi gravada.
+ *
+ *  AJUSTE 6.2 (out/2026) — MANUTENÇÃO PREVENTIVA — basta colar e publicar
+ *  "Nova versão" (as abas novas são criadas sozinhas, nada é apagado):
+ *   - Abas "config" (intervalos padrão da preventiva) e "alertas"
+ *     (histórico de alertas de troca de óleo, correia/corrente e pneus).
+ *   - As trocas ficam na aba "manutencoes", que já existia.
+ *   - Registro de manutenção excluído (exclusão lógica) ou importado de
+ *     planilha não conta como leitura de KM: assim nunca bloqueia a
+ *     retirada de um motorista com "KM inválido".
  *******************************************************************/
 
 // ====== CONFIG ======
@@ -50,7 +59,7 @@ var NIVEIS_BAIXA = ["Administrador","Gestor"];
 // Abas (tabelas) do banco
 var ABAS = ["usuarios","motoristas","veiculos","destinos","retiradas",
             "devolucoes","abastecimentos","manutencoes","ocorrencias","calibragens",
-            "baixas","auditoria","meta"];
+            "baixas","auditoria","config","alertas","meta"];
 
 /* Colunas de cada aba (exceto "meta"):
    A id | B json (registro completo) | C atualizadoEm (ms) |
@@ -359,7 +368,7 @@ function indicesDe_(aba, r){
   var data = r && r.data ? (new Date(r.data).getTime()||"") : "";
   return [
     r && r.veiculoId ? String(r.veiculoId) : "",
-    campo ? (Number(r[campo])||0) : "",
+    campo ? ((r && (r.excluido || r.kmNaoConta)) ? 0 : (Number(r[campo])||0)) : "",
     data,
     aba==="retiradas" ? (r.devolvida ? 0 : 1) : "",
     r ? String(r.motoristaId || r.responsavelId || "") : ""
