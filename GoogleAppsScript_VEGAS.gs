@@ -27,6 +27,15 @@
  *     consegue usar funções administrativas, mesmo alterando o app).
  *   - Baixa administrativa de veículo não entregue (aba "baixas"),
  *     com histórico que NÃO pode ser alterado nem apagado.
+ *
+ *  AJUSTE 6.1 (out/2026) — basta colar e publicar "Nova versão":
+ *   - Motorista consegue devolver viatura que o gestor retirou no nome
+ *     dele, mesmo quando a retirada ficou com o id de um cadastro
+ *     duplicado (confere pelo nome).
+ *   - Correção de KM pelo gestor (dígito a mais) não é desfeita por
+ *     aparelhos desatualizados.
+ *   - Se um item extra (ocorrência/auditoria) falhar, a entrega NÃO é
+ *     recusada — ela já foi gravada.
  *******************************************************************/
 
 // ====== CONFIG ======
@@ -457,7 +466,7 @@ function autorizar_(sess, aba, reg, antigo){
   if(sess.t!=="motorista") throw "SEM_PERMISSAO";
   var meu = function(o){
     return !!o && (String(o.motoristaId||"")===String(sess.id) || String(o.registradoPorId||"")===String(sess.id) ||
-                   String(o.responsavelId||"")===String(sess.id));
+                   String(o.responsavelId||"")===String(sess.id) || mesmoMotorista_(o.motoristaId, o.motoristaNome, sess));
   };
   switch(aba){
     case "auditoria":
@@ -507,8 +516,24 @@ function protegerRegistro_(aba, antigo, novo){
   }
   if(aba==="veiculos"){
     var kmA = Number(antigo.km)||0, kmN = Number(r.km)||0;
-    var correcaoNova = r.kmCorrigidoEm && r.kmCorrigidoEm !== antigo.kmCorrigidoEm;
-    if(kmN < kmA && !correcaoNova){ r.km = kmA; r.kmEm = antigo.kmEm || r.kmEm; }
+    var tA = antigo.kmCorrigidoEm ? (new Date(antigo.kmCorrigidoEm).getTime()||0) : 0;
+    var tN = r.kmCorrigidoEm ? (new Date(r.kmCorrigidoEm).getTime()||0) : 0;
+    var correcaoNova = tN > tA;                       // só uma correção MAIS NOVA pode baixar o KM
+    if(!correcaoNova){
+      if(tA){ r.kmCorrigidoEm = antigo.kmCorrigidoEm; if(antigo.kmCorrigidoValor!==undefined) r.kmCorrigidoValor = antigo.kmCorrigidoValor; }
+      if(kmN < kmA){ r.km = kmA; r.kmEm = antigo.kmEm || r.kmEm; }
+      else if(tA && tN < tA && kmN > kmA){
+        // aparelho que ainda não recebeu a correção: não deixa o KM errado voltar
+        var real = kmAtualServidor_(antigo.id, antigo);
+        if(kmN > real){ r.km = real; r.kmEm = antigo.kmEm || r.kmEm; }
+      }
+    }
+  }
+  var campoKm = CAMPO_KM[aba];
+  if(campoKm && (antigo.correcoesKm||[]).length > (r.correcoesKm||[]).length){
+    // KM corrigido pelo gestor: aparelho com a cópia antiga não regrava o valor errado
+    [campoKm,"kmInicial","kmPercorrido"].forEach(function(k){ if(antigo[k]!==undefined) r[k] = antigo[k]; });
+    r.correcoesKm = antigo.correcoesKm;
   }
   if(aba==="usuarios" && !r.senha && antigo.senha){ r.senha = antigo.senha; }
   return r;
@@ -605,6 +630,15 @@ function acharPorId_(aba, id){
 }
 function chaveNome_(s){ return String(s||"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/\s+/g," ").trim().toLowerCase(); }
 function nomeMotorista_(id){ var m = acharPorId_("motoristas", id); return m ? m.nome : ""; }
+/* O registro é do motorista logado, mesmo com id diferente? Confere pelo NOME.
+   Retiradas feitas pelo gestor num aparelho com a lista antiga (nomes
+   duplicados) ficaram com o id de um cadastro que já foi unificado. */
+function mesmoMotorista_(id, nomeGuardado, sess){
+  if(!sess || sess.t!=="motorista" || !sess.n) return false;
+  var m = id ? acharPorId_("motoristas", id) : null;
+  var nome = m ? m.nome : (nomeGuardado||"");
+  return !!nome && chaveNome_(nome)===chaveNome_(sess.n);
+}
 function retiradasAbertasIdx_(vid){
   vid = String(vid);
   return lerIndices_("retiradas").filter(function(x){ return x.vid===vid && x.aberta; })
@@ -654,14 +688,23 @@ function devolver_(body, sess){
     upsert_("retiradas", r);
   }
   if(!r) return {ok:false, erro:"RETIRADA_NAO_ENCONTRADA"};
-  if(sess.t==="motorista" && String(r.motoristaId)!==String(sess.id) && String(r.registradoPorId||"")!==String(sess.id))
-    return {ok:false, erro:"SEM_PERMISSAO: esta viatura está no nome de outro motorista"};
+  if(sess.t==="motorista" && String(r.motoristaId)!==String(sess.id) && String(r.registradoPorId||"")!==String(sess.id)){
+    if(!mesmoMotorista_(r.motoristaId, r.motoristaNome, sess))
+      return {ok:false, erro:"SEM_PERMISSAO: esta viatura está no nome de outro motorista — peça ao gestor para usar \"Alterar motorista\""};
+    if(!acharPorId_("motoristas", r.motoristaId)){
+      // id de cadastro que não existe mais: passa a retirada para o cadastro atual do motorista
+      r.motoristaIdAnterior = r.motoristaId; r.motoristaId = sess.id; r.motoristaNome = sess.n;
+      dev.motoristaId = sess.id; dev.motoristaNome = sess.n;
+    }
+  }
   if(r.devolvida){
     if(r.devolucaoId===dev.id) return {ok:true, jaRegistrada:true, veiculo:acharPorId_("veiculos", r.veiculoId)};
     if(r.baixaId) return {ok:false, erro:"BAIXA_ADMINISTRATIVA", baixaId:r.baixaId};
     return {ok:false, erro:"JA_DEVOLVIDA", devolucaoId:r.devolucaoId};
   }
   if((Number(dev.kmFinal)||0) < (Number(r.kmInicial)||0)) return {ok:false, erro:"KM_INVALIDO", kmAtual:Number(r.kmInicial)||0};
+  dev.kmInicial = Number(r.kmInicial)||0;                       // usa o KM da retirada já corrigido pelo gestor
+  dev.kmPercorrido = (Number(dev.kmFinal)||0) - dev.kmInicial;
 
   upsert_("devolucoes", dev);
   r.devolvida = true; r.devolucaoId = dev.id; r.devolvidaEm = dev.data;
@@ -678,13 +721,21 @@ function devolver_(body, sess){
     veiculo.ultimoMotoristaId = r.motoristaId;
     upsert_("veiculos", veiculo);
   }
-  gravarExtras_(body.extras, sess);
-  return {ok:true, veiculo: veiculo ? acharPorId_("veiculos", veiculo.id) : null};
+  var avisos = gravarExtras_(body.extras, sess);
+  return {ok:true, veiculo: veiculo ? acharPorId_("veiculos", veiculo.id) : null,
+    retirada: acharPorId_("retiradas", r.id), devolucao: dev, avisos: avisos};
 }
+/* Grava ocorrência/auditoria que acompanham a retirada/entrega. Se algum item
+   falhar, NÃO desfaz nem recusa a operação principal (que já foi gravada). */
 function gravarExtras_(extras, sess){
+  var avisos = [];
   (extras||[]).forEach(function(it){
-    if(it && it.aba && it.registro && it.aba!=="retiradas" && it.aba!=="devolucoes") upsert_(it.aba, it.registro, {sess:sess});
+    if(it && it.aba && it.registro && it.aba!=="retiradas" && it.aba!=="devolucoes"){
+      try{ upsert_(it.aba, it.registro, {sess:sess}); }
+      catch(e){ avisos.push(it.aba+": "+e); }
+    }
   });
+  return avisos;
 }
 
 // ====== BAIXA ADMINISTRATIVA — VEÍCULO NÃO ENTREGUE ======

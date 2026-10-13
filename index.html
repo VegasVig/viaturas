@@ -691,11 +691,17 @@ function nuvemPull(opts){
             devolucaoId:loc.devolucaoId||r.devolucaoId, devolvidaEm:loc.devolvidaEm||r.devolvidaEm});
         } else if(aba==="veiculos"){
           const m=Object.assign({},r,loc);
-          const correcaoLocal=loc.kmCorrigidoEm && loc.kmCorrigidoEm!==r.kmCorrigidoEm;
-          if(!correcaoLocal && (+r.km||0)>(+loc.km||0)){ m.km=r.km; m.kmEm=r.kmEm; }
+          const tL=tms(loc.kmCorrigidoEm), tR=tms(r.kmCorrigidoEm);
+          if(tR>tL){ m.km=r.km; m.kmEm=r.kmEm; m.kmCorrigidoEm=r.kmCorrigidoEm; m.kmCorrigidoValor=r.kmCorrigidoValor; }   // correção feita em outro aparelho
+          else if(tL<=tR && (+r.km||0)>(+loc.km||0)){ m.km=r.km; m.kmEm=r.kmEm; }
           arr[i]=m;
         } else {
           arr[i]=loc;                       // edição local ainda não enviada vence
+        }
+        // KM corrigido pelo gestor em outro aparelho não volta ao valor errado
+        const ck=CAMPO_KM_ABA[aba];
+        if(ck && (r.correcoesKm||[]).length>(loc.correcoesKm||[]).length){
+          const m=arr[i]; [ck,"kmInicial","kmPercorrido"].forEach(k=>{ if(r[k]!==undefined) m[k]=r[k]; }); m.correcoesKm=r.correcoesKm;
         }
         reenviar.add(aba);
       });
@@ -1473,6 +1479,22 @@ function retiradasAbertas(vid){
     .sort((a,b)=>new Date(b.data)-new Date(a.data));
 }
 function retiradaAberta(vid){ return retiradasAbertas(vid)[0]; }
+/* A retirada é do usuário logado? Compara pelo id e, quando o id não bate,
+   pelo NOME. Retiradas que o gestor registrou para um motorista num aparelho
+   com a lista antiga (nomes duplicados) ficaram com o id de um cadastro que já
+   foi unificado — o motorista não via a viatura em "Devolver" e não conseguia
+   dar baixa. Agora ele vê e consegue devolver. */
+function retiradaDoUsuario(r){
+  if(!r || !SESSION) return false;
+  if(String(r.motoristaId)===String(SESSION.id)) return true;
+  if(SESSION.tipo!=="motorista") return false;
+  const nome=motorista(r.motoristaId)?.nome || r.motoristaNome || "";
+  return !!nome && chaveNome(nome)===chaveNome(SESSION.nome);
+}
+/* Campo de KM de cada tabela (usado na correção de KM pelo gestor). */
+const CAMPO_KM_ABA={retiradas:"kmInicial",devolucoes:"kmFinal",abastecimentos:"km",manutencoes:"km",calibragens:"km"};
+const ROTULO_KM_ABA={retiradas:"KM da retirada",devolucoes:"KM da entrega",abastecimentos:"KM do abastecimento",manutencoes:"KM da manutenção",calibragens:"KM da calibragem"};
+function tms(iso){ return iso?(new Date(iso).getTime()||0):0; }
 const STATUS_MANUAIS=["Manutenção","Indisponível","Reservado"];
 /* Em uso = existe retirada aberta. Senão vale o status manual
    (Manutenção/Indisponível/Reservado). Senão, Disponível. */
@@ -1487,11 +1509,11 @@ function veiculoDisponivel(v){ return statusVeiculo(v)==="Disponível"; }
 function kmLeituras(vid){
   const out=[];
   const nomeM=(id,nome)=>nome||motorista(id)?.nome||"—";
-  DB.retiradas.filter(r=>r.veiculoId===vid).forEach(r=>out.push({data:r.data,evento:"Retirada",km:+r.kmInicial||0,motorista:nomeM(r.motoristaId,r.motoristaNome),ref:r.id}));
-  DB.devolucoes.filter(d=>d.veiculoId===vid).forEach(d=>out.push({data:d.data,evento:d.automatica?"Entrega (automática)":"Entrega",km:+d.kmFinal||0,motorista:nomeM(d.motoristaId,d.motoristaNome),ref:d.id}));
-  DB.abastecimentos.filter(a=>a.veiculoId===vid && a.tipo!=="gerador" && +a.km>0).forEach(a=>out.push({data:a.data,evento:"Abastecimento",km:+a.km,motorista:nomeM(a.motoristaId),ref:a.id}));
-  DB.manutencoes.filter(m=>m.veiculoId===vid && +m.km>0).forEach(m=>out.push({data:m.data,evento:"Manutenção — "+(m.tipo||""),km:+m.km,motorista:"—",ref:m.id}));
-  (DB.calibragens||[]).filter(c=>c.veiculoId===vid && +c.km>0).forEach(c=>out.push({data:c.data,evento:"Calibragem",km:+c.km,motorista:c.responsavelNome||"—",ref:c.id}));
+  DB.retiradas.filter(r=>r.veiculoId===vid).forEach(r=>out.push({data:r.data,evento:"Retirada",km:+r.kmInicial||0,motorista:nomeM(r.motoristaId,r.motoristaNome),ref:r.id,aba:"retiradas",corrigido:!!(r.correcoesKm&&r.correcoesKm.length)}));
+  DB.devolucoes.filter(d=>d.veiculoId===vid).forEach(d=>out.push({data:d.data,evento:d.automatica?"Entrega (automática)":"Entrega",km:+d.kmFinal||0,motorista:nomeM(d.motoristaId,d.motoristaNome),ref:d.id,aba:"devolucoes",corrigido:!!(d.correcoesKm&&d.correcoesKm.some(c=>c.campo==="kmFinal"))}));
+  DB.abastecimentos.filter(a=>a.veiculoId===vid && a.tipo!=="gerador" && +a.km>0).forEach(a=>out.push({data:a.data,evento:"Abastecimento",km:+a.km,motorista:nomeM(a.motoristaId),ref:a.id,aba:"abastecimentos",corrigido:!!(a.correcoesKm&&a.correcoesKm.length)}));
+  DB.manutencoes.filter(m=>m.veiculoId===vid && +m.km>0).forEach(m=>out.push({data:m.data,evento:"Manutenção — "+(m.tipo||""),km:+m.km,motorista:"—",ref:m.id,aba:"manutencoes",corrigido:!!(m.correcoesKm&&m.correcoesKm.length)}));
+  (DB.calibragens||[]).filter(c=>c.veiculoId===vid && +c.km>0).forEach(c=>out.push({data:c.data,evento:"Calibragem",km:+c.km,motorista:c.responsavelNome||"—",ref:c.id,aba:"calibragens",corrigido:!!(c.correcoesKm&&c.correcoesKm.length)}));
   return out.sort((a,b)=>new Date(a.data)-new Date(b.data));
 }
 /* KM ATUAL = maior leitura registrada. Se o gestor corrigiu o KM
@@ -1794,14 +1816,15 @@ function saveVeiculo(id){
     if(kmInf<atual){
       if(SESSION.tipo==="motorista"){ alert(MSG_KM_INVALIDO); return; }
       if(!confirm("O KM informado ("+fmtNum(kmInf)+") é MENOR que o último registrado ("+fmtNum(atual)+").\n\nIsso só deve ser feito para corrigir erro de digitação. Confirmar a correção?")) return;
-      data.km=kmInf; data.kmCorrigidoEm=nowISO(); data.kmEm=data.kmCorrigidoEm;
+      data.km=kmInf; data.kmCorrigidoEm=nowISO(); data.kmEm=data.kmCorrigidoEm; data.kmCorrigidoValor=kmInf;
       log("Corrigiu KM do veículo",v.interno+": "+fmtNum(atual)+" → "+fmtNum(kmInf));
     } else if(kmInf>atual){ data.km=kmInf; data.kmEm=nowISO(); }
     if(retiradaAberta(id)) data.status="Em uso";
     Object.assign(v,data); log("Editou veículo",v.interno);
   }
   else { DB.veiculos.push({id:uid("v"),foto:null,...data,km:kmInf,kmEm:nowISO()}); log("Cadastrou veículo",data.interno); }
-  saveSync(["veiculos","auditoria"]); closeModal(); toast("Veículo salvo"); go("veiculos");
+  saveSync(["veiculos","auditoria"]); closeModal(); toast("Veículo salvo");
+  if(CURRENT==="wizard" && WZ && WZ.mode==="devolucao") renderDevWizard(); else go("veiculos");
 }
 
 /* ---- Página do veículo ---- */
@@ -1842,7 +1865,8 @@ ROUTES["veiculo-det"]=async(el,id)=>{
         <button class="btn sm" onclick="formVeiculo('${id}')">✏️ Editar</button>
         ${retiradaAberta(id)?`<button class="btn sm blue" onclick="startDevolucao('${retiradaAberta(id).id}')">🔄 Registrar entrega</button>
           <button class="btn sm sec" onclick="go('baixa-nova','${retiradaAberta(id).id}')">🧾 Dar baixa (não entregue)</button>
-          <button class="btn sm sec" onclick="formAlterarMotorista('${retiradaAberta(id).id}')">👤 Alterar motorista</button>`:""}
+          <button class="btn sm sec" onclick="formAlterarMotorista('${retiradaAberta(id).id}')">👤 Alterar motorista</button>
+          ${podeCorrigirKm()?`<button class="btn sm sec" onclick="formCorrigirKm('retiradas','${retiradaAberta(id).id}')">✏️ Corrigir KM da retirada</button>`:""}`:""}
         ${ehGerador(v)?"":`<button class="btn sm sec" onclick="formCalibragem('${id}')">🛞 Calibragem</button>`}
         <button class="btn sm sec" onclick="setStatus('${id}','Manutenção')">🔧 Manutenção</button>
         <button class="btn sm sec" onclick="setStatus('${id}','Disponível')">🟢 Disponível</button>
@@ -1878,8 +1902,9 @@ ROUTES["veiculo-det"]=async(el,id)=>{
     <div id="v-timeline"></div>
   </div>`;
   const lk=kmLeituras(id).slice().reverse();
-  $("#v-kmhist").innerHTML = lk.length?`<div class="table-wrap"><table><thead><tr><th>Data</th><th>Evento</th><th style="text-align:right">KM</th><th>Motorista</th></tr></thead>
-    <tbody>${lk.map(l=>`<tr><td>${dtBR(l.data)}</td><td>${esc(l.evento)}</td><td style="text-align:right">${fmtNum(l.km)}</td><td>${esc(l.motorista)}</td></tr>`).join("")}</tbody></table></div>`
+  const ckOk=podeCorrigirKm();
+  $("#v-kmhist").innerHTML = lk.length?`${ckOk?`<div class="hint" style="margin-bottom:6px">KM digitado errado (ex.: um dígito a mais)? Toque em <b>✏️</b> na linha para corrigir.</div>`:""}<div class="table-wrap"><table><thead><tr><th>Data</th><th>Evento</th><th style="text-align:right">KM</th><th>Motorista</th>${ckOk?"<th></th>":""}</tr></thead>
+    <tbody>${lk.map(l=>`<tr><td>${dtBR(l.data)}</td><td>${esc(l.evento)}${l.corrigido?' <span class="tag orange" title="KM corrigido pelo gestor">corrigido</span>':""}</td><td style="text-align:right">${fmtNum(l.km)}</td><td>${esc(l.motorista)}</td>${ckOk?`<td>${l.aba?`<button class="btn sm sec" style="width:auto;padding:4px 10px" title="Corrigir KM" onclick="formCorrigirKm('${l.aba}','${l.ref}')">✏️</button>`:""}</td>`:""}</tr>`).join("")}</tbody></table></div>`
     :'<div class="empty"><div class="em">🛣️</div>Nenhuma leitura de KM ainda</div>';
   renderTimeline($("#v-timeline"),id);
 };
@@ -2321,7 +2346,7 @@ function wzClear(){ localStorage.removeItem(WZ_KEY); WZ=null; }
 
 /* ---------- HOME MOTORISTA ---------- */
 ROUTES["mot-home"]=(el)=>{
-  const emUso=DB.retiradas.filter(r=>!r.devolvida && r.motoristaId===SESSION.id && veiculo(r.veiculoId));
+  const emUso=DB.retiradas.filter(r=>!r.devolvida && retiradaDoUsuario(r) && veiculo(r.veiculoId));
   const draft=wzLoad();
   el.innerHTML=`<div class="wrap">
     <h2 class="page-title">🏠 Olá, ${esc(SESSION.nome.split(/[\s,]/)[0])}! <small>Seus registros saem automaticamente em seu nome.</small></h2>
@@ -2350,7 +2375,7 @@ function resumeWizard(){ WZ=wzLoad(); if(WZ&&WZ.mode==="retirada") renderWizard(
 
 /* ---------- MEUS REGISTROS ---------- */
 ROUTES["mot-hist"]=(el)=>{
-  const rets=DB.retiradas.filter(r=>r.motoristaId===SESSION.id).slice().reverse();
+  const rets=DB.retiradas.filter(r=>retiradaDoUsuario(r)).slice().reverse();
   el.innerHTML=`<div class="wrap"><h2 class="page-title">📋 Meus registros</h2>
     <div class="list">${rets.length?rets.map(r=>{
       const v=veiculo(r.veiculoId);
@@ -2958,7 +2983,7 @@ function removePhoto(key){
 ROUTES["mot-devolver"]=(el)=>{
   const desenhar=()=>{
     if(CURRENT!=="mot-devolver") return;
-    const emUso=DB.retiradas.filter(r=>!r.devolvida && veiculo(r.veiculoId) && (SESSION.tipo!=="motorista"||r.motoristaId===SESSION.id))
+    const emUso=DB.retiradas.filter(r=>!r.devolvida && veiculo(r.veiculoId) && (SESSION.tipo!=="motorista"||retiradaDoUsuario(r)))
       .sort((a,b)=>new Date(b.data)-new Date(a.data));
     el.innerHTML=`<div class="wrap"><h2 class="page-title">🔄 Devolver viatura</h2>
       <p class="desc" style="color:var(--muted)">Selecione a viatura em uso para registrar a entrega.</p>
@@ -2966,7 +2991,8 @@ ROUTES["mot-devolver"]=(el)=>{
         return `<div class="opt" onclick="startDevolucao('${r.id}')"><div class="av">${esc(v.interno.replace("V-",""))}</div>
           <div class="info"><div class="t">${esc(v.interno)} · ${esc(v.placa)}</div>
           <div class="s">👨‍✈️ ${esc(m?.nome||r.motoristaNome||"")} → ${esc(r.destinoNome)} · saída ${dtBR(r.data)} · KM ${fmtNum(r.kmInicial)}</div></div>›</div>`;
-      }).join(""):'<div class="empty"><div class="em">🅿️</div>Nenhuma viatura em uso'+(SESSION.tipo==="motorista"?" no seu nome":"")+'</div>'}</div></div>`;
+      }).join(""):'<div class="empty"><div class="em">🅿️</div>Nenhuma viatura em uso'+(SESSION.tipo==="motorista"?" no seu nome":"")+'</div>'}</div>
+      ${SESSION.tipo==="motorista"?`<div class="hint" style="margin-top:10px">Pegou uma viatura que está no nome de outro motorista? Peça ao gestor para usar <b>👤 Alterar motorista</b> na página do veículo — depois ela aparece aqui para você devolver.</div>`:""}</div>`;
   };
   desenhar();
   // atualiza da nuvem: a retirada pode ter sido feita em outro aparelho
@@ -2980,6 +3006,10 @@ async function startDevolucao(retId){
     await atualizarAntes();
     r=DB.retiradas.find(x=>x.id===retId);
     if(r && r.devolvida){ alert("Esta retirada já teve a entrega registrada."); go(SESSION.tipo==="motorista"?"mot-home":"dashboard"); return; }
+  }
+  if(SESSION.tipo==="motorista" && !retiradaDoUsuario(r)){
+    alert("Esta viatura está no nome de "+(motorista(r.motoristaId)?.nome||r.motoristaNome||"outro motorista")+".\n\nPeça ao gestor para usar “👤 Alterar motorista” na página do veículo e tente de novo.");
+    return;
   }
   closeModal();
   WZ={mode:"devolucao",step:0,retiradaId:retId,veiculoId:r.veiculoId,motoristaId:r.motoristaId,
@@ -3013,8 +3043,13 @@ function dvKm(b){
       <div class="rl"><span>Motorista que estava usando</span><b>${esc(m?.nome||r.motoristaNome||"—")}</b></div>
       <div class="rl"><span>Retirado em</span><b>${dtBR(r.data)}</b></div>
       <div class="rl"><span>KM na retirada</span><b>${fmtNum(r.kmInicial)}</b></div>
-      ${minimo>(+r.kmInicial||0)?`<div class="rl"><span>Última leitura registrada</span><b>${fmtNum(minimo)}</b></div>`:""}
+      ${minimo>(+r.kmInicial||0)?(()=>{ const lm=leituraMaxima(WZ.veiculoId); return `<div class="rl"><span>Última leitura registrada</span><b>${fmtNum(minimo)}${lm?" · "+esc(lm.evento)+" "+dBR(lm.data):""}</b></div>`; })():""}
     </div>
+    ${podeCorrigirKm()?`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+        <button class="btn sm sec" style="width:auto" onclick="formCorrigirKm('retiradas','${r.id}')">✏️ Corrigir KM da retirada</button>
+        ${minimo>(+r.kmInicial||0)?(leituraMaxima(WZ.veiculoId)&&leituraMaxima(WZ.veiculoId).ref!==r.id?`<button class="btn sm sec" style="width:auto" onclick="formCorrigirKm('${leituraMaxima(WZ.veiculoId).aba}','${leituraMaxima(WZ.veiculoId).ref}')">✏️ Corrigir última leitura</button>`
+          :`<button class="btn sm sec" style="width:auto" onclick="formVeiculo('${WZ.veiculoId}')">✏️ Corrigir KM do veículo</button>`):""}
+      </div>`:""}
     <label>KM final</label><input id="dv-km" type="number" inputmode="numeric" value="${esc(WZ.kmFinal)}" placeholder="Ex.: 85487" oninput="WZ.kmFinal=this.value;wzSave();dvKmCalc()">
     <div class="hint" id="dv-calc"></div>
     <label style="margin-top:14px">Observações da entrega (opcional)</label>
@@ -3028,7 +3063,9 @@ function dvKmCalc(){
   const h=$("#dv-calc"); if(!h)return;
   const perc=(+WZ.kmFinal)-(r.kmInicial);
   if(!WZ.kmFinal){h.textContent="";return;}
-  if(+WZ.kmFinal<dvKmMin()){h.innerHTML="<b style='color:var(--red)'>"+esc(MSG_KM_INVALIDO)+"</b>";}
+  if(+WZ.kmFinal<dvKmMin()){h.innerHTML="<b style='color:var(--red)'>"+esc(MSG_KM_INVALIDO)+"</b><br>"+
+    (podeCorrigirKm()?"Se o KM da retirada (ou a última leitura) foi digitado errado, use o botão <b>✏️ Corrigir</b> acima.":
+     "Se o KM da retirada foi digitado errado (ex.: um dígito a mais), peça ao gestor para corrigir — ele consegue pelo aplicativo. Depois é só continuar a entrega.");}
   else h.innerHTML=`Percorrido: <b style="color:var(--green)">${fmtNum(perc)} km</b>`;
 }
 function dvKmGo(){
@@ -3099,6 +3136,10 @@ async function finalizarDevolucao(){
   if(r.devolvida){ alert("Esta retirada já teve a entrega registrada (em outro aparelho)."); wzClear(); go(SESSION.tipo==="motorista"?"mot-home":"dashboard"); return; }
   const erroKm=validarKm(v.id, WZ.kmFinal, Math.max(+r.kmInicial||0, kmAtual(v.id)));
   if(erroKm){ alert(erroKm); WZ.step=0; wzSave(); renderDevWizard(); return; }
+  if(SESSION.tipo==="motorista" && String(r.motoristaId)!==String(SESSION.id) && retiradaDoUsuario(r) && !motorista(r.motoristaId)){
+    // retirada registrada com o id de um cadastro duplicado que já foi removido
+    r.motoristaIdAnterior=r.motoristaId; r.motoristaId=SESSION.id; r.motoristaNome=SESSION.nome;
+  }
 
   // 2) fotos
   const did=uid("dev");
@@ -3229,7 +3270,7 @@ function formAbastecimento(tipo){
   const vs=DB.veiculos, ms=DB.motoristas.filter(m=>m.status==="Ativo");
   const motDefault=SESSION.tipo==="motorista"?SESSION.id:"";
   // motorista: já sugere o veículo que está com ele
-  const veicDefault=SESSION.tipo==="motorista"?(DB.retiradas.find(r=>!r.devolvida&&r.motoristaId===SESSION.id)?.veiculoId||""):"";
+  const veicDefault=SESSION.tipo==="motorista"?(DB.retiradas.find(r=>!r.devolvida&&retiradaDoUsuario(r))?.veiculoId||""):"";
   window._painel=null; window._cupom=null;
   const geradoresUsados=[...new Set(DB.abastecimentos.filter(a=>a.tipo==="gerador"&&a.gerador).map(a=>a.gerador))];
   openModal("Registrar abastecimento",`
@@ -3438,7 +3479,7 @@ function formCalibragem(vid){
   closeModal();
   const vs=DB.veiculos.filter(v=>!ehGerador(v)), ms=DB.motoristas.filter(m=>m.status==="Ativo");
   const motDefault=SESSION.tipo==="motorista"?SESSION.id:"";
-  if(!vid && SESSION.tipo==="motorista") vid=DB.retiradas.find(r=>!r.devolvida&&r.motoristaId===SESSION.id)?.veiculoId||"";
+  if(!vid && SESSION.tipo==="motorista") vid=DB.retiradas.find(r=>!r.devolvida&&retiradaDoUsuario(r))?.veiculoId||"";
   openModal("Registrar calibragem dos pneus",`
     <label>Veículo</label><select id="cb-veic" onchange="cbVeicMudou()"><option value="">Selecione</option>${vs.map(v=>`<option value="${v.id}" ${v.id===vid?"selected":""}>${esc(v.interno)} · ${esc(v.placa)}</option>`).join("")}</select>
     <div id="cb-info" class="hint"></div>
@@ -3513,7 +3554,7 @@ ROUTES.ocorrencias=(el)=>{
 function formOcorrencia(){
   const vs=DB.veiculos,ms=DB.motoristas.filter(m=>m.status==="Ativo");
   const motDefault=SESSION.tipo==="motorista"?SESSION.id:"";
-  const veicOcc=SESSION.tipo==="motorista"?(DB.retiradas.find(r=>!r.devolvida&&r.motoristaId===SESSION.id)?.veiculoId||""):"";
+  const veicOcc=SESSION.tipo==="motorista"?(DB.retiradas.find(r=>!r.devolvida&&retiradaDoUsuario(r))?.veiculoId||""):"";
   openModal("Nova ocorrência",`
     <label>Tipo</label><select id="o-tipo">${["Acidente","Avaria","Pane","Multa","Problema mecânico","Falta de combustível","Problema operacional","Outro"].map(o=>`<option>${o}</option>`).join("")}</select>
     <label>Veículo</label><select id="o-veic"><option value="">Selecione</option>${vs.map(v=>`<option value="${v.id}" ${v.id===veicOcc?"selected":""}>${esc(v.interno)} · ${esc(v.placa)}</option>`).join("")}</select>
@@ -4390,6 +4431,134 @@ function salvarAlteracaoMotorista(retId){
   const v=veiculo(r.veiculoId); if(v && v.retiradaAtualId===r.id) v.motoristaAtualId=novo.id;
   log("Alterou motorista da retirada",(v?.interno||"")+": "+antes.nome+" → "+novo.nome+" · motivo: "+motivo);
   saveSync(["retiradas","veiculos","auditoria"]); closeModal(); toast("Motorista alterado ✓","ok"); go("veiculo-det",r.veiculoId);
+}
+
+/* ======================================================================
+   CORREÇÃO DE KM PELO GESTOR — erro de digitação (ex.: dígito a mais)
+   Corrige o KM de uma retirada, entrega, abastecimento, manutenção ou
+   calibragem. O valor antigo fica guardado no próprio registro
+   (correcoesKm) e na auditoria. O KM atual do veículo é recalculado e
+   marcado como correção (kmCorrigidoEm): o servidor e os outros aparelhos
+   aceitam o valor menor e o motorista consegue registrar a entrega com o
+   KM certo.
+   ====================================================================== */
+function podeCorrigirKm(){ return !!SESSION && SESSION.tipo==="admin" && SESSION.nivel!=="Consulta"; }
+/* Leitura que define o KM atual (a maior depois da última correção). */
+function leituraMaxima(vid){
+  const v=veiculo(vid); if(!v) return null;
+  const corte=tms(v.kmCorrigidoEm); let best=null;
+  kmLeituras(vid).forEach(l=>{ if(corte && tms(l.data)<=corte) return; if(!best || l.km>best.km) best=l; });
+  return best && best.km>=(+v.km||0) ? best : null;
+}
+/* KM que o veículo passa a ter se o registro refId tiver o valor novo. */
+function kmVeiculoAposCorrecao(vid,refId,novo){
+  const v=veiculo(vid); if(!v) return +novo||0;
+  const corte=tms(v.kmCorrigidoEm);
+  let km=corte?(+v.kmCorrigidoValor||0):0;
+  kmLeituras(vid).forEach(l=>{
+    if(corte && tms(l.data)<=corte) return;
+    const val=l.ref===refId?(+novo||0):l.km;
+    if(val>km) km=val;
+  });
+  return km;
+}
+function formCorrigirKm(aba,id){
+  if(!podeCorrigirKm()){ toast("Somente o gestor pode corrigir o KM","erro"); return; }
+  const campo=CAMPO_KM_ABA[aba], reg=(DB[aba]||[]).find(x=>x.id===id);
+  if(!campo || !reg){ toast("Registro não encontrado","erro"); return; }
+  const v=veiculo(reg.veiculoId);
+  const corte=tms(v?.kmCorrigidoEm);
+  const afeta=!!v && !(corte && tms(reg.data)<=corte);
+  const nomeM=motorista(reg.motoristaId)?.nome||reg.motoristaNome||reg.responsavelNome||"—";
+  const hist=(reg.correcoesKm||[]).map(c=>`<div class="rl"><span>Correção anterior</span><b>${fmtNum(c.de)} → ${fmtNum(c.para)} · ${esc(c.por||"")} ${dtBR(c.em)}</b></div>`).join("");
+  openModal("Corrigir quilometragem",`
+    <div class="rec-lines">
+      <div class="rl"><span>Veículo</span><b>${esc(v?.interno||"")} · ${esc(v?.placa||"")}</b></div>
+      <div class="rl"><span>Registro</span><b>${esc(ROTULO_KM_ABA[aba])} · ${dtBR(reg.data)}</b></div>
+      <div class="rl"><span>Motorista</span><b>${esc(nomeM)}</b></div>
+      ${aba==="devolucoes"?`<div class="rl"><span>KM na retirada</span><b>${fmtNum(reg.kmInicial)}</b></div>`:""}
+      <div class="rl"><span>KM registrado</span><b style="color:var(--red)">${fmtNum(reg[campo])}</b></div>
+      ${hist}
+    </div>
+    <label>KM correto *</label>
+    <input id="ck-km" type="number" inputmode="numeric" placeholder="Digite o KM certo" oninput="ckCalc('${aba}','${id}')">
+    <div class="hint" id="ck-calc"></div>
+    ${afeta?`<label>KM atual do veículo depois da correção</label>
+      <input id="ck-veic" type="number" inputmode="numeric" value="${esc(kmAtual(v.id))}" oninput="this.dataset.manual='1'">
+      <div class="hint">Calculado automaticamente pelo histórico. Só altere se souber o valor exato do painel.</div>`
+      :`<div class="hint">Este registro é anterior à última correção de KM do veículo — o KM atual do veículo (${fmtNum(kmAtual(v?.id))}) não muda.</div>`}
+    <label>Motivo da correção *</label>
+    <textarea id="ck-motivo" placeholder="Ex.: motorista digitou um dígito a mais (854870 em vez de 85487)"></textarea>
+    <div class="hint">O valor antigo fica guardado no registro e na auditoria (quem corrigiu, quando, de quanto para quanto e por quê).</div>
+    <div class="wizard-nav"><button class="btn sec" onclick="closeModal()">Cancelar</button>
+      <button class="btn" onclick="salvarComBotao(this,()=>salvarCorrecaoKm('${aba}','${id}'))">Salvar correção</button></div>`);
+  setTimeout(()=>{ const i=$("#ck-km"); if(i) i.focus(); },50);
+}
+function ckDevDaRetirada(r){ return DB.devolucoes.find(d=>d.id===r.devolucaoId) || DB.devolucoes.find(d=>d.retiradaId===r.id) || null; }
+function ckCalc(aba,id){
+  const campo=CAMPO_KM_ABA[aba], reg=(DB[aba]||[]).find(x=>x.id===id), h=$("#ck-calc");
+  if(!reg || !h) return;
+  const txt=$("#ck-km").value, novo=+txt;
+  const iv=$("#ck-veic");
+  if(txt===""||isNaN(novo)){ h.textContent=""; if(iv && !iv.dataset.manual) iv.value=kmAtual(reg.veiculoId); return; }
+  if(iv && !iv.dataset.manual) iv.value=kmVeiculoAposCorrecao(reg.veiculoId,id,novo);
+  const msgs=[];
+  const ant=kmLeituras(reg.veiculoId).filter(l=>l.ref!==id && tms(l.data)<tms(reg.data)).pop();
+  if(ant && novo<ant.km) msgs.push(`<b style="color:var(--orange)">⚠ Menor que a leitura anterior (${fmtNum(ant.km)} · ${esc(ant.evento)} ${dBR(ant.data)}).</b>`);
+  if(aba==="devolucoes"){
+    const p=novo-(+reg.kmInicial||0);
+    msgs.push(p<0?`<b style="color:var(--red)">Menor que o KM da retirada (${fmtNum(reg.kmInicial)}).</b>`:`Percorrido passa a ser <b style="color:var(--green)">${fmtNum(p)} km</b>.`);
+  }
+  if(aba==="retiradas"){
+    const d=ckDevDaRetirada(reg);
+    if(d){ const p=(+d.kmFinal||0)-novo; msgs.push(p<0?`<b style="color:var(--red)">Maior que o KM da entrega (${fmtNum(d.kmFinal)}) — corrija a entrega também.</b>`:`Percorrido da entrega passa a ser <b style="color:var(--green)">${fmtNum(p)} km</b>.`); }
+    else if(!reg.devolvida) msgs.push(`Na entrega, o KM final precisará ser a partir de <b>${fmtNum(novo)}</b>.`);
+  }
+  h.innerHTML=msgs.join("<br>");
+}
+function salvarCorrecaoKm(aba,id){
+  const campo=CAMPO_KM_ABA[aba], reg=(DB[aba]||[]).find(x=>x.id===id);
+  if(!campo || !reg){ toast("Registro não encontrado","erro"); return; }
+  const txt=$("#ck-km").value, motivo=$("#ck-motivo").value.trim();
+  if(txt==="" || isNaN(+txt) || +txt<0){ toast("Informe o KM correto","erro"); return; }
+  const novo=Math.round(+txt), antes=+reg[campo]||0;
+  if(novo===antes){ toast("O KM informado é igual ao que já está registrado","erro"); return; }
+  if(!motivo){ toast("Informe o motivo da correção","erro"); return; }
+  let dev=null;
+  if(aba==="devolucoes" && novo<(+reg.kmInicial||0)){
+    alert("O KM da entrega não pode ser menor que o KM da retirada ("+fmtNum(reg.kmInicial)+").\n\nSe o KM da retirada também está errado, corrija a retirada primeiro."); return;
+  }
+  if(aba==="retiradas"){
+    dev=ckDevDaRetirada(reg);
+    if(dev && (+dev.kmFinal||0)<novo){ alert("O KM da retirada ficaria maior que o KM da entrega ("+fmtNum(dev.kmFinal)+").\n\nCorrija primeiro o KM da entrega."); return; }
+  }
+  const v=veiculo(reg.veiculoId);
+  const corte=tms(v?.kmCorrigidoEm);
+  const afeta=!!v && !(corte && tms(reg.data)<=corte);
+  const agora=nowISO();
+  const corr={campo,de:antes,para:novo,por:SESSION.nome,porId:SESSION.id,em:agora,motivo};
+  reg[campo]=novo;
+  reg.correcoesKm=(reg.correcoesKm||[]).concat([corr]);
+  const abas=new Set([aba]);
+  if(aba==="devolucoes") reg.kmPercorrido=novo-(+reg.kmInicial||0);
+  if(dev){
+    dev.kmInicial=novo; dev.kmPercorrido=(+dev.kmFinal||0)-novo;
+    dev.correcoesKm=(dev.correcoesKm||[]).concat([{...corr,campo:"kmInicial",origem:"retirada"}]);
+    abas.add("devolucoes");
+  }
+  let kmV=null;
+  if(afeta){
+    const iv=$("#ck-veic");
+    kmV=Math.round(iv && iv.value!=="" && !isNaN(+iv.value) ? +iv.value : kmVeiculoAposCorrecao(v.id,id,novo));
+    v.km=kmV; v.kmEm=agora; v.kmCorrigidoEm=agora; v.kmCorrigidoValor=kmV;
+    abas.add("veiculos");
+  }
+  log("Corrigiu KM",(v?.interno||"")+" · "+ROTULO_KM_ABA[aba]+" de "+dtBR(reg.data)+": "+fmtNum(antes)+" → "+fmtNum(novo)+
+    (kmV!=null?" · KM do veículo: "+fmtNum(kmV):"")+" · motivo: "+motivo);
+  abas.add("auditoria");
+  saveSync([...abas]); closeModal(); toast("KM corrigido ✓","ok");
+  if(CURRENT==="wizard" && WZ && WZ.mode==="devolucao") renderDevWizard();
+  else if(v) go("veiculo-det",v.id);
 }
 
 </script>
