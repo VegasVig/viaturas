@@ -789,7 +789,8 @@ async function filaSincronizar(){
   const restantes=[];
   try{
     for(const item of mapa.values()){
-      try{ await api("push",{aba:item.aba,registro:limparRegistro(item.registro)}); marcarSync(item.aba,[item.registro]); }
+      try{ const res=await api("push",{aba:item.aba,registro:limparRegistro(item.registro)}); marcarSync(item.aba,[item.registro]);
+        if(res&&res.registro) adotarDoServidor([{aba:item.aba,registro:res.registro}]); }
       catch(e){ restantes.push(item); }
     }
   } finally { FILA_RODANDO=false; }
@@ -829,6 +830,17 @@ function hashReg(r){
   for(let i=0;i<t.length;i++){ h=((h<<5)-h+t.charCodeAt(i))|0; }
   return h+":"+t.length;
 }
+function adotarDoServidor(lista){
+  let alterou=false;
+  (lista||[]).forEach(it=>{
+    const reg=it&&it.registro, aba=it&&it.aba;
+    if(!reg||reg.id==null||!Array.isArray(DB[aba])) return;
+    const i=DB[aba].findIndex(x=>String(x.id)===String(reg.id));
+    if(i>=0) DB[aba][i]=reg; else DB[aba].push(reg);
+    marcarSync(aba,[reg]); alterou=true;
+  });
+  if(alterou) save();
+}
 function marcarSync(aba,regs){
   const hs=syncHashes(); hs[aba]=hs[aba]||{};
   regs.forEach(r=>{ if(r && r.id!=null) hs[aba][r.id]=hashReg(r); });
@@ -855,8 +867,9 @@ async function nuvemPushTabela(aba){
     for(let i=0;i<dados.length;i+=20){
       const lote=dados.slice(i,i+20);
       try{
-        await api("pushMuitos",{itens:lote.map(r=>({aba,registro:r}))});
+        const res=await api("pushMuitos",{itens:lote.map(r=>({aba,registro:r}))});
         marcarSync(aba,lote);
+        adotarDoServidor(res&&res.diferentes);
       }catch(e){
         console.warn("push tabela falhou",aba,e.message);
         lote.forEach(r=>filaAdd(aba,r));   // não perde: tenta de novo depois
@@ -2809,6 +2822,7 @@ async function finalizarRetirada(){
       if(!erroDeRede(e)){
         const d=e.dados||{};
         if(d.erro==="VEICULO_EM_USO"){
+          adotarDoServidor([{aba:"retiradas",registro:d.retirada},{aba:"veiculos",registro:d.veiculo}]);
           await atualizarAntes();
           const c=d.conflito||{};
           alert((v.interno+" · "+v.placa)+" acabou de ser retirado em outro aparelho.\n\nMotorista: "+(c.motoristaNome||"—")+

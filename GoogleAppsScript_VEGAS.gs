@@ -263,18 +263,22 @@ function handle_(e){
     else if(acao==="push"){                 // grava/atualiza um registro
       // body: {aba, registro:{...}}
       exigirSessao_(sess);
-      upsert_(body.aba, body.registro, {sess:sess});
+      var salvo = upsert_(body.aba, body.registro, {sess:sess});
       out = {ok:true};
+      if(difereDoEnviado_(salvo, body.registro)) out.registro = salvo;
     }
     else if(acao==="pushMuitos"){           // grava vários de uma vez
       // grava todos os que puder; se algum falhar, avisa (o app reenvia)
       exigirSessao_(sess);
-      var falhas = [];
+      var falhas = [], diferentes = [];
       (body.itens||[]).forEach(function(it){
-        try{ upsert_(it.aba, it.registro, {sess:sess}); }
+        try{
+          var salvo = upsert_(it.aba, it.registro, {sess:sess});
+          if(difereDoEnviado_(salvo, it.registro)) diferentes.push({aba:it.aba, registro:salvo});
+        }
         catch(e){ falhas.push((it.registro&&it.registro.id)+": "+e); }
       });
-      out = falhas.length ? {ok:false, erro:"falhou: "+falhas.join(" | ")} : {ok:true};
+      out = falhas.length ? {ok:false, erro:"falhou: "+falhas.join(" | "), diferentes:diferentes} : {ok:true, diferentes:diferentes};
     }
     else if(acao==="apagar"){               // apaga um registro por id
       // body: {aba, id}
@@ -648,6 +652,11 @@ function mesmoMotorista_(id, nomeGuardado, sess){
   var nome = m ? m.nome : (nomeGuardado||"");
   return !!nome && chaveNome_(nome)===chaveNome_(sess.n);
 }
+// O servidor gravou algo diferente do que o aparelho mandou (ignorou ou protegeu)? O aparelho precisa adotar a versão do servidor.
+function difereDoEnviado_(salvo, enviado){
+  if(!salvo || !enviado) return false;
+  try{ return JSON.stringify(salvo)!==JSON.stringify(limpaBase64_(enviado)); }catch(e){ return true; }
+}
 function retiradasAbertasIdx_(vid){
   vid = String(vid);
   return lerIndices_("retiradas").filter(function(x){ return x.vid===vid && x.aberta; })
@@ -668,7 +677,8 @@ function retirar_(body, sess){
   if(abertas.length){
     var aberta = lerLinha_("retiradas", abertas[0].row) || {};
     return {ok:false, erro:"VEICULO_EM_USO", conflito:{retiradaId:aberta.id, motoristaId:aberta.motoristaId,
-      motoristaNome: aberta.motoristaNome || nomeMotorista_(aberta.motoristaId), data:aberta.data, kmInicial:aberta.kmInicial}};
+      motoristaNome: aberta.motoristaNome || nomeMotorista_(aberta.motoristaId), data:aberta.data, kmInicial:aberta.kmInicial},
+      retirada: aberta, veiculo: veiculo};
   }
   var kmAt = kmAtualServidor_(reg.veiculoId, veiculo);
   if((Number(reg.kmInicial)||0) < kmAt) return {ok:false, erro:"KM_INVALIDO", kmAtual:kmAt};

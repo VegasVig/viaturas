@@ -2,7 +2,7 @@
 // Estratégia "rede primeiro": com internet, sempre pega a versão mais nova
 // do GitHub; sem internet, usa a cópia salva. Assim, toda alteração que você
 // publicar chega sozinha no app instalado.
-const CACHE = 'vegas-frota-v9';  // v9 (manutenção preventiva); v8 (entrega de retirada feita pelo gestor + correção de KM); v7 (nomes duplicados); v6: troca de versão força os aparelhos a pegarem o app novo
+const CACHE = 'vegas-frota-v10';  // v10 (aparelho adota a versão do servidor quando ela diverge); v9 (manutenção preventiva); v8 (entrega de retirada feita pelo gestor + correção de KM); v7 (nomes duplicados); v6: troca de versão força os aparelhos a pegarem o app novo
 const ARQUIVOS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png',
   './logo-vegas.png', './login-bg.jpg', './login-bg-m.jpg'];
 
